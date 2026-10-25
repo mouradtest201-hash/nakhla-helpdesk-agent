@@ -1,165 +1,269 @@
-*Simulated systems for the IT Helpdesk Agent brief of the Agentic AI Bootcamp, organized by Jerusalem High-Tech Foundry (JHF) · in partnership with COMCEC.*
+# Nakhla IT Helpdesk Agent
 
-# IT Helpdesk kit
+A production-shaped **agentic IT support assistant** for the fictional Nakhla Systems dataset.
+It retrieves current knowledge-base policy, routes and prioritises tickets with a deterministic
+policy engine, calls the company systems through **MCP**, remembers employees across sessions, and
+**never writes to the system of record without a separate human approval**.
 
-Everything your agent needs around it, so your week goes into the agent:
+Built for the Agentic AI Bootcamp Scenario 2 brief. The simulated helpdesk API, MCP server and
+dataset are the provided kit and are **not modified**; everything under `app/`, `tests/`, `evals/`
+and `ui/` is the implementation.
 
-- the **dataset** of Nakhla Systems, a fictional software company: 20 knowledge-base documents
-  (2 of them PDF-only), 40 historical tickets, 25 employees, a status page;
-- the company's **helpdesk API** (simulated system of record, FastAPI, port **8102**);
-- an **MCP server** in front of it (stdio, 6 tools);
-- a **UI starter**, the **eval runner** and 10 **sample cases**.
+```
+employee ── POST /api/chat ──► intake ──► retrieval ──► policy engine ──► resolver
+                                  │           │              │
+                                  │           │              └─ category / priority / refusals
+                                  │           └─ exact code + BM25 + embeddings, current docs only
+                                  └─ employee, status page, ticket history over MCP
 
-You build the agent: retrieval over the knowledge base, the conversation, the approval gate,
-your API contract on port 8000. Do not change the simulated systems: the hidden tests run
-against the original.
+          ◄── reply + citations + pending_action ──┘
+employee ── POST /api/approve ──► approval gate ──► MCP create_ticket (idempotency_key = action_id)
+```
 
-## Quickstart (Windows PowerShell)
+## What it does
+
+| Requirement | Implementation |
+|---|---|
+| **Real agentic workflow, 2+ roles** | Three explicit roles: **intake** (structured facts), **resolver** (grounded answer), **escalator** (schema-valid ticket draft). A deterministic state machine coordinates them and can run without the LLM. |
+| **MCP + a real API** | The app talks MCP stdio to `services/helpdesk_mcp.py`: `lookup_employee`, `get_service_status`, `search_tickets`, `get_ticket`, `create_ticket`, `add_ticket_note`. The last two are **only** reachable from the approval gate. |
+| **Short- and long-term memory** | Short term: persisted session turns, last intake/decision, pending action and status cache (SQLite + in-process cache). Long term: employee profile cache, saved preferences, draft/ticket facts, and ticket history fetched from the helpdesk. |
+| **Guardrails + approval gate** | Input checks, untrusted-source scrubbing, prompt-injection handling, secret redaction, citation allow-list, no unbacked ticket IDs, strict policy refusals, and a single write path. |
+| **10+ evals, scorecard, fixed failure** | 10 provided cases **10/10**, 20 additional cases **20/20**, 24 unit tests, and eight targeted hardening fixes (see [Evaluation](#evaluation)). |
+| **Contract + one-command start + UI** | `GET /health`, `POST /api/chat`, `POST /api/approve`; `.\run.ps1`, `./run.sh`, or `docker compose up --build`; Gradio client with sources, tool calls and a draft-approval card. |
+
+## Quick start
+
+Requirements: Python 3.12, an OpenRouter API key, and (optionally) Docker.
 
 ```powershell
-py -3.12 -m venv .venv
-.venv\Scripts\Activate.ps1
+# Windows
+copy .env.example .env        # put OPENROUTER_API_KEY=... in .env
+.\run.ps1
+```
+
+```bash
+# macOS / Linux
+cp .env.example .env
+./run.sh
+```
+
+Or inside an existing venv:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env                                  # then fill in OPENROUTER_API_KEY
-
-uvicorn services.helpdesk_api:app --port 8102           # terminal 1: the helpdesk API
-python check_kit.py                                     # terminal 2: must end with "Kit ready."
-python dataset/validate_dataset.py                      # optional: dataset consistency
+python run.py
 ```
 
-macOS/Linux: `python3.12 -m venv .venv`, `source .venv/bin/activate`, `cp .env.example .env`.
-Docker instead of uvicorn: `docker compose up --build` (same API on port 8102).
+The runner starts the helpdesk API on **:8102**, the agent on **:8000**, and the UI on **:7860**.
+`Ctrl+C` stops all three. `--no-ui` skips Gradio; `--no-helpdesk` uses an API that is already
+running.
 
-One venv is enough for the kit **and** your agent: `requirements.txt` also pins the course's agent
-framework (`langgraph==1.2.10`, `openai==2.52.0`) and `mcp==1.28.1`, the MCP version CrewAI 1.15 needs.
-Already have the course's Module 2 venv? `pip install -r requirements.txt` into it works too.
+Docker (starts helpdesk, agent and UI in one command):
 
-## Layout
+```bash
+docker compose up --build
+```
 
-| Path | What |
+| Service | URL |
 |---|---|
-| `dataset/` | knowledge base, tickets, schemas, manifest, precedence rules: start with `dataset/README.md` |
-| `services/helpdesk_api.py` | the simulated helpdesk API (system of record) |
-| `services/helpdesk_mcp.py` | the MCP server your agent uses (`python -m services.helpdesk_mcp`) |
-| `services/data/` | seed data: `employees.json` (directory), `status.json` (status page) |
-| `services/Dockerfile`, `docker-compose.yml` | container for the API; add your app to the compose file |
-| `ui/app_ui.py` | Gradio starter: chat, sources panel, ticket-draft card with Approve / Reject. Talks only to your API. |
-| `evals/` | `cases.sample.jsonl` (10 cases) and `run_evals.py` (the shared runner) |
-| `check_kit.py` | smoke test: API health, a keyed REST call, MCP `list_tools` + one read call |
+| Agent API docs | http://localhost:8000/docs |
+| Gradio UI | http://localhost:7860 |
+| Simulated helpdesk docs | http://localhost:8102/docs |
 
-## The helpdesk API (port 8102)
+The first start builds a 111-chunk index from the Markdown **and PDF** knowledge base. Embeddings
+are optional: if OpenRouter is unavailable the retriever falls back to exact-code + keyword search,
+and replies fall back to verified deterministic templates.
 
-Business endpoints need the header `X-API-Key` (value of `HELPDESK_API_KEY`). Errors are JSON:
-`{"error": {"code": "...", "message": "...", "fields": [...]}}` with real HTTP codes.
-Interactive docs: http://localhost:8102/docs
+## API contract
 
-| Method | Path | What it does | Errors |
-|---|---|---|---|
-| GET | `/health` | `{"status": "ok", "service": "helpdesk"}` (no key) | |
-| GET | `/api/directory/{email}` | employee: department, office, VIP, contractor, MFA, VPN client and gateway, account status | 401, 404 `employee_not_found` |
-| GET | `/api/status` | status page: services and incidents (`active_incidents` lists the ids) | 401 |
-| GET | `/api/tickets?requester_email=&q=&status=&limit=` | search the archive and new tickets; `q` = keywords in subject and description; `status` = open, resolved, closed; `limit` 1-50 (default 10) | 401, 422 |
-| GET | `/api/tickets/{ticket_id}` | one ticket with notes | 401, 404 `ticket_not_found` |
-| POST | `/api/tickets` | create a ticket; body = `dataset/schemas/ticket.schema.json`; header `Idempotency-Key`; returns 201 and the ticket with `ticket_id` IT-2001, IT-2002, ... | 401, 400, 409 `idempotency_conflict`, 422 `validation_error` with `fields` |
-| POST | `/api/tickets/{ticket_id}/notes` | add a note `{"note": "..."}`; header `Idempotency-Key` | 401, 404, 409, 422 |
+### `GET /health`
 
-Ticket body rules: `category` from the 8 categories, `priority` P1-P4, `requester_email` must be in
-the directory, `department` must match the directory, `attempted_steps` needs at least one step,
-every `kb_refs` id must exist (`[]` is allowed when the KB has no answer), optional `affected_users`.
-The API sets `assigned_team` from the category and adds `warnings` if you cite a deprecated or draft document.
-Same `Idempotency-Key` + same body = the same ticket, never a duplicate.
+```json
+{"status": "ok", "service": "nakhla-helpdesk-agent", "version": "1.0.0"}
+```
 
-### Test-only admin endpoints (no key)
+### `POST /api/chat`
 
-They exist for the eval runner and the hidden tests. **Your app must not call them.**
+```json
+{
+  "session_id": "demo-1",
+  "message": "NakhlaConnect shows NX-112 and I cannot work. Please open a ticket.",
+  "user": {"email": "sara.mikhail@nakhla.example"}
+}
+```
 
-| Method | Path | What it does |
-|---|---|---|
-| POST | `/admin/reset` | restore the seed data, clear faults, logs and created tickets |
-| POST | `/admin/faults` | `{"target": "create_ticket", "mode": "error_503", "count": 1}`: the next `count` calls of that operation fail |
-| GET / DELETE | `/admin/faults` | show / clear armed faults |
-| GET | `/admin/log` | recent requests: method, path, status, ms, operation |
-| GET | `/admin/tickets` | tickets created since the last reset (`?all=1`: archive too) |
-| GET | `/admin/notes` | notes added since the last reset |
+```json
+{
+  "session_id": "demo-1",
+  "reply": "**Ticket draft - not created yet.** ...",
+  "state": "awaiting_approval",
+  "pending_action": {
+    "action_id": "act_7f3a...",
+    "type": "create_ticket",
+    "summary": "Create network_access P2 ticket for sara.mikhail@nakhla.example: ...",
+    "payload": {"subject": "...", "category": "network_access", "priority": "P2", "...": "..."}
+  },
+  "result": null,
+  "citations": [{"id": "KB-002", "title": "NakhlaConnect VPN: error codes and fixes", "url": null}],
+  "tool_calls": [{"tool": "lookup_employee", "ok": true, "ms": 41}],
+  "usage": {"prompt_tokens": 1203, "completion_tokens": 94, "cost_usd": 0.000631}
+}
+```
 
-Fault targets: `create_ticket`, `directory`, `status`, `search_tickets`, `get_ticket`, `add_note`.
-Modes: `error_500`, `error_503`, `timeout` (waits 15 s, then 504), `slow` (waits 3 s, then succeeds).
+### `POST /api/approve`
+
+```json
+{"session_id": "demo-1", "action_id": "act_7f3a...", "approved": true}
+```
+
+Only this endpoint can execute the proposed write. It sends exactly the draft payload over MCP with
+`idempotency_key = action_id`, and copies the real `ticket_id` from the response into `result`.
+`action_id` may be omitted to approve the latest pending action for the session. `approved: false`
+writes nothing. Re-approving the same action returns the same ticket and never creates a duplicate.
+
+The app also implements the contract's extra state fields: `result` stays `null` unless a write
+really succeeded, and `citations` never include deprecated or draft documents.
+
+## Policy precedence, in code
+
+The model does not decide policy. `app/domain/policy.py` applies the manifest rules before a reply is
+written; the resolver receives the decision as facts.
+
+| Rule from the dataset | Where it shows up |
+|---|---|
+| Security policies (`SP-`) override KB articles | `SP-001` forbids phone password resets and admin-credential disclosure even when an old KB guide says otherwise. |
+| Only current documents are sources | `KB-001` (deprecated) and `KB-005` (superseded) are never cited; `KB-018` (draft/wiki) is never ingested. |
+| Authoritative + newer wins | `KB-002` v5.4 beats `KB-001` v3; `KB-015` v3's “more than 3 users = P1” beats the old 5+ rule in `KB-017`. |
+| Department exceptions override general rules | Finance VPN → `security`, Security Operations, P2 (P1 above 3 users); contractors get VDI, not VPN; Executive Office is always P1. |
+| Documents beat ticket history | A solved historical ticket cannot override a current KB/SP rule; history is used only for context and duplicate awareness. |
+
+Priority is deterministic too: VIP/Executive Office → P1, more than three affected users → P1,
+Finance VPN → P2 (or P1 with more than three users), repeated lockouts → security P2,
+onboarding without a laptop → P2, missing onboarding account/access → P3.
+
+## Retrieval
+
+`app/rag/ingest.py` parses YAML front matter and both PDFs (`KB-012`, `KB-013`), scrubs untrusted
+text, and splits the knowledge base into 111 overlapping chunks. `app/rag/retriever.py` combines:
+
+1. an exact error-code index from `dataset/manifest.json` (e.g. `NX-781` → `KB-002`),
+2. BM25-style keyword scoring,
+3. cosine similarity over `openai/text-embedding-3-small` vectors when available,
+4. metadata + precedence filters (status, supersedes, department, allowed citations).
+
+An armed fault on the directory or status tool produces an honest “could not check” reply and never
+a guessed department or a write. A `503`/timeout on `create_ticket` returns a failure with
+`result: null`, no ticket ID, and leaves the draft available for a retry.
+
+## Memory and approval
+
+- **Sessions** (`app/memory/sessions.py`) persist turns, last intake/decision, citations and the
+  pending action ID, so a restart does not lose a draft. Sessions expire after 180 minutes.
+- **Long-term memory** (`app/memory/long_term.py`) stores employee profile snapshots, “remember
+  that…” preferences, last issue/draft, and ticket facts. Recall is always labelled *“my notes, not
+  company policy”*. A second session for the same employee can recall a saved preference.
+- **Actions** (`app/memory/actions.py`) use an atomic `proposed → executing` claim in SQLite.
+  That is what makes double clicks, repeated approvals and retried HTTP requests safe.
+- **Writes** are impossible from `/api/chat`: chat messages or a typed “yes” only point the user to
+  `/api/approve`. The LLM has no tool bindings at all; the orchestrator calls MCP, and the write
+  functions are reachable only inside the approval code path.
+
+## Guardrails
+
+| Threat | Defence |
+|---|---|
+| Prompt injection / jailbreak | Direct override attempts are refused before any model or tool call. Quoted suspicious text is treated as data, never as instructions. |
+| Poisoned wiki page (`KB-018`) | Draft documents are excluded at ingestion and citation time. The embedded secret and `posture_check=off` are scrubbed on input/output and never appear in the index. |
+| Secret disclosure | `SP-001`: admin credentials, password read-outs, MFA device changes by the desk and SMS codes are refused with the correct policy citation. |
+| HR/privacy | Salary, medical, personal files and another employee's records are refused (`KB-016`). |
+| Hallucinated ticket IDs | An `IT-####` string is only shown if it came from a real write result or a real helpdesk read. |
+| Wrong/outdated citations | Output guard drops deprecated/draft IDs and anything outside the manifest allow-list. |
+| Duplicate writes | Per-action idempotency key + atomic claim + “already created” reply. |
+| Looping proposals | The session caps pending drafts and asks the user to approve or reject one first. |
+
+## Evaluation
 
 ```powershell
-curl.exe -X POST http://localhost:8102/admin/faults -H "Content-Type: application/json" `
-  -d '{\"target\": \"create_ticket\", \"mode\": \"error_503\", \"count\": 1}'
-curl.exe -X POST http://localhost:8102/admin/reset
+.\.venv\Scripts\python.exe -m pytest tests -q
+.\.venv\Scripts\python.exe evals/run_evals.py
+.\.venv\Scripts\python.exe evals/run_evals.py --cases evals/cases.extra.jsonl --verbose
 ```
 
-## The MCP server (stdio)
+Final local results (one run, no judging):
 
-Your app starts it as a subprocess and talks MCP over stdin/stdout. It calls the REST API, so
-its state is the state the tests see. Tool errors come back as `{"ok": false, "error": {...}}`.
-
-| Tool | Use it to |
+| Suite | Result |
 |---|---|
-| `lookup_employee(email)` | get department, VIP, contractor, MFA, VPN client version and gateway **before** applying department rules or choosing a priority |
-| `get_service_status()` | check for an active incident **before** troubleshooting or drafting a ticket |
-| `search_tickets(query=None, requester_email=None, status=None, limit=5)` | the requester's ticket history (your long-term memory) and similar past cases |
-| `create_ticket(subject, description, category, priority, requester_email, department, attempted_steps, kb_refs, idempotency_key, affected_users=1)` | **write**: only from your approval step, after the employee approved this exact draft |
-| `get_ticket(ticket_id)` | one ticket with its notes |
-| `add_ticket_note(ticket_id, note)` | **write**: add information to the employee's own ticket |
+| Provided sample cases | **10/10 (100%)** - avg turn 3.22 s, p95 4.84 s |
+| Additional cases (`evals/cases.extra.jsonl`) | **20/20 (100%)** - avg turn 3.21 s, p95 5.40 s |
+| Unit tests | **24 passed** |
 
-```python
-import os, sys
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+The extra cases cover precedence, department exceptions, VIP/4-user priority, PDF-only KB pages,
+contractor refusals, HR privacy, prompt injection, admin credentials, onboarding priority,
+long-term memory recall, double approval, an unknown error code, Engineering Elevate and the
+contractor software rule.
 
-params = StdioServerParameters(command=sys.executable, args=["-m", "services.helpdesk_mcp"],
-                               env=dict(os.environ))   # pass env on, or the server will not see your .env values
-async with stdio_client(params) as (read, write):
-    async with ClientSession(read, write) as session:
-        await session.initialize()
-        result = await session.call_tool("lookup_employee", {"email": "tariq.hamdan@nakhla.example"})
+**Fixed failure worth calling out.** The first extra run was 13/18. The failure was not a broken
+retrieval score; it was missing evidence in the approval response and a draft that did not name the
+routing team. I fixed the approval path to carry the draft's `kb_refs` into `citations`, added the
+assigned team to the draft card, and kept the security-policy references on security drafts. That
+took the suite to 18/18 at that point; two later department cases (Engineering Elevate and
+contractor software) bring the current total to **20/20**. During the same hardening pass I also
+fixed a real distinction between “employee not found” (404) and “directory unavailable” (5xx),
+which previously produced the wrong message for unknown users.
+
+## Repository map
+
+```
+app/
+  main.py                 FastAPI contract + background warm-up
+  workflow.py             state machine, approval gate, memory/ticket-history paths
+  models.py               Chat/Approve/TicketDraft/Employee models
+  config.py, llm.py       OpenRouter client, graceful no-key fallback
+  agents/                 intake, resolver, escalator (three roles)
+  domain/                 manifest, playbooks, deterministic policy engine
+  guardrails/             input, untrusted-source scrubbing, output guard
+  rag/                     ingest, embedder, hybrid store, retriever
+  memory/                  SQLite sessions, long-term facts, atomic actions
+  mcp/client.py            MCP stdio client
+dataset/, services/        provided kit (unchanged)
+evals/                     shared runner, 10 sample + 20 extra cases
+tests/                     24 unit tests
+ui/app_ui.py               Gradio client (sources, tools, approve/reject card)
+run.py, run.ps1, run.sh    one-command local start
+Dockerfile                 app image; docker-compose.yml starts helpdesk + app + UI
+DESIGN.md                  architecture, trade-offs and failure analysis
+docs/KIT.md                original kit documentation
 ```
 
-The knowledge base is **not** an MCP tool: ingestion, chunking, embeddings and retrieval over
-`dataset/knowledge_base/` (Markdown and PDF) are yours to build, for example OpenRouter
-`openai/text-embedding-3-small` with a numpy cosine store, or Chroma.
+## Design notes
 
-## The approval gate
+- **Deterministic policy, model for language.** The highest-risk requirement is precedence, so it is
+  testable code, not a prompt. The model may extract nuance and polish prose, but it cannot change a
+  category, priority, route, refusal or citation. The app still works with no API key.
+- **Explicit state machine instead of a framework.** The brief allows a graph, a crew, or your own
+  loop. A small explicit machine keeps the single-write invariant obvious and avoids framework
+  behaviour hiding the approval gate.
+- **MCP is the only path to the system of record.** The app does not call the helpdesk REST API
+  directly, and the model never receives a write tool.
+- **Honest failure over confident nonsense.** Tool failures, unknown codes, not-found employees and
+  write errors all get distinct replies with `result: null` and no invented ticket ID.
 
-Keep `create_ticket` (and `add_ticket_note`) **out of the model's tool list**. The model drafts a
-ticket; your API returns it as `pending_action` (`type: "create_ticket"`); only `POST /api/approve`
-calls `create_ticket` over MCP with exactly that payload and `idempotency_key = action_id`.
-Show only the `ticket_id` the API returned. A rejected draft writes nothing.
+More detail, including the state table and the threat model, is in [DESIGN.md](DESIGN.md).
 
-## Environment variables
+## Known limitations
 
-| Variable | Default | Used by |
-|---|---|---|
-| `HELPDESK_API_KEY` | `dev-key-change-me` | API, MCP server, check_kit (must be the same everywhere) |
-| `HELPDESK_API_URL` | `http://localhost:8102` | MCP server, check_kit, your app |
-| `HELPDESK_TODAY` | real today | API: date of new tickets and of the status page (`YYYY-MM-DD`) |
-| `HELPDESK_TIMEOUT_S` | `20` | MCP server: seconds before a call to the API gives up |
-| `HELPDESK_MCP_LOG_LEVEL` | `WARNING` | MCP server log level on stderr |
-| `HELPDESK_DATA_DIR`, `HELPDESK_DATASET_DIR` | `services/data`, `dataset` | API seed files |
-| `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, `MODEL`, `EMBEDDING_MODEL` | see `.env.example` | your agent |
-| `APP_URL` | `http://localhost:8000` | UI starter, eval runner |
+- This is a single-process demo: SQLite and in-memory session caches assume one app worker. A
+  production deployment would move sessions/actions to Postgres or Redis.
+- There is no end-user authentication in front of the demo UI; the work email is supplied by the
+  client, as the course contract specifies. A real deployment must derive identity from SSO.
+- The deterministic playbooks intentionally cover every error code in the manifest. A brand-new code
+  is escalated honestly rather than answered speculatively, until the KB is updated.
+- The Gradio UI is a demo client, not an accessibility- or mobile-certified helpdesk console.
 
-The API and the MCP server also read the kit's `.env` (without overriding variables you already set).
+## License / dataset
 
-## UI starter and evals
-
-```powershell
-python ui/app_ui.py                          # http://localhost:7860, talks to APP_URL
-python evals/run_evals.py                    # the 10 sample cases against your app on :8000
-python evals/run_evals.py --only S2-05 -v    # one case, every turn
-```
-
-The case format and the API contract are described in the mini-project's `common/CONTRACT.md`.
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `check_kit.py`: API not answering | start `uvicorn services.helpdesk_api:app --port 8102` from this folder |
-| 401 `unauthorized` | the same `HELPDESK_API_KEY` for the API, the MCP server and your app |
-| MCP tool returns `unreachable` | the API is not running, or `HELPDESK_API_URL` is wrong (in Docker use the service name) |
-| Everything fails with 503 | a fault is still armed: `curl.exe -X DELETE http://localhost:8102/admin/faults` |
-| Ticket ids keep growing | `POST /admin/reset` restores the seed state (tests do this before every case) |
+The Nakhla Systems dataset and simulated services are course material for the Agentic AI Bootcamp
+(Jerusalem High-Tech Foundry / COMCEC). This repository contains the student implementation around
+that kit. No real company data or credentials are included; `.env` is git-ignored.

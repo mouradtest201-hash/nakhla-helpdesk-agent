@@ -13,6 +13,14 @@ venv/
 .chroma/
 chroma_db/
 
+# runtime state: sessions, long-term memory, pending actions, built index
+data/
+*.db
+*.db-shm
+*.db-wal
+evals/scorecard.md
+evals/scorecard.json
+
 # editors and OS
 .vscode/
 .idea/

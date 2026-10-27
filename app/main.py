@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -32,6 +34,36 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("nakhla.app")
+
+# Simple in-memory rate limiter
+_rate_limit_store = defaultdict(list)
+_RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))
+_RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
+
+
+async def rate_limit_middleware(request: Request, call_next):
+    """Basic rate limiting for API endpoints."""
+    if request.url.path.startswith("/api/"):
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.time()
+        # Clean old entries
+        _rate_limit_store[client_ip] = [
+            req_time for req_time in _rate_limit_store[client_ip]
+            if now - req_time < _RATE_LIMIT_WINDOW
+        ]
+        if len(_rate_limit_store[client_ip]) >= _RATE_LIMIT_REQUESTS:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Please try again later."},
+            )
+        _rate_limit_store[client_ip].append(now)
+    response = await call_next(request)
+    # Add security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 
 async def _warmup() -> None:
@@ -81,13 +113,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Security: Restrict CORS origins (use environment variable for flexibility)
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:7860,http://127.0.0.1:7860").split(",")
+ALLOWED_ORIGINS = [origin.strip() for origin in ALLOWED_ORIGINS if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+app.middleware("http")(rate_limit_middleware)
 
 
 @app.get("/health")

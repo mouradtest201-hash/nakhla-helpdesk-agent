@@ -50,6 +50,12 @@ MAX_CONVERSATION_MESSAGES = int(os.getenv("MAX_CONVERSATION_MESSAGES") or 24)
 MAX_ACTIONS_PER_SESSION = int(os.getenv("MAX_ACTIONS_PER_SESSION") or 20)
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES") or 180)
 
+# ── Security settings ─────────────────────────────────────────────────────────
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:7860,http://127.0.0.1:7860")
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS") or 60)
+RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW") or 60)  # seconds
+ENABLE_AUDIT_LOG = os.getenv("ENABLE_AUDIT_LOG", "true").lower() == "true"
+
 
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)

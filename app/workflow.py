@@ -97,6 +97,11 @@ STATUS_BY_TOPIC = {
     "onboarding": "vdi",
 }
 
+# Global status cache for optimization
+_global_status_cache = None
+_global_status_cache_time = 0.0
+_GLOBAL_STATUS_TTL = 300  # 5 minutes
+
 
 class WorkflowError(Exception):
     def __init__(self, code: str, message: str, status_code: int = 400) -> None:
@@ -265,10 +270,13 @@ class Workflow:
         intake = await run_intake(verdict.text, state, employee, meter=meter)
         code = intake.error_code
 
-        # ── live status (once per session, short cache) ──────────────────
+        # ── live status (once per session, short cache + global cache) ──────────────────
+        global _global_status_cache, _global_status_cache_time
         status: dict[str, Any] | None = None
         if state.status_cache and (time.time() - state.status_at) < 120:
             status = state.status_cache
+        elif _global_status_cache and (time.time() - _global_status_cache_time) < _GLOBAL_STATUS_TTL:
+            status = _global_status_cache
         elif not intake.needs_clarification or intake.issue_topic not in ("other", None):
             if employee and not (employee.contractor and intake.issue_topic == "vpn"):
                 outcome = await mcp_client.call("get_service_status", {})
@@ -277,6 +285,8 @@ class Workflow:
                     status = outcome.data.get("status") or outcome.data
                     state.status_cache = status
                     state.status_at = time.time()
+                    _global_status_cache = status
+                    _global_status_cache_time = time.time()
 
         decision = decide(verdict.text, intake, employee, manifest=manifest)
         state.last_intake = intake.model_dump()

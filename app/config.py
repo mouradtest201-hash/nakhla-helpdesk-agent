@@ -46,9 +46,10 @@ HELPDESK_TIMEOUT_S = float(os.getenv("HELPDESK_TIMEOUT_S") or 20)
 
 # ── Service limits ───────────────────────────────────────────────────────────
 MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS") or 4000)
-MAX_CONVERSATION_MESSAGES = int(os.getenv("MAX_CONVERSATION_MESSAGES") or 24)
+MAX_CONVERSATION_MESSAGES = int(os.getenv("MAX_CONVERSATION_MESSAGES") or 16)  # Optimized: reduced from 24
 MAX_ACTIONS_PER_SESSION = int(os.getenv("MAX_ACTIONS_PER_SESSION") or 20)
 SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES") or 180)
+CONTEXT_WINDOW_MESSAGES = int(os.getenv("CONTEXT_WINDOW_MESSAGES") or 12)  # For LLM context
 
 # ── Security settings ─────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:7860,http://127.0.0.1:7860")

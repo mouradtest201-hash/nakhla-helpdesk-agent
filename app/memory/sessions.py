@@ -43,6 +43,11 @@ class SessionState:
         self.messages.append({"role": role, "text": text, "at": now_iso()})
         if len(self.messages) > MAX_CONVERSATION_MESSAGES:
             self.messages = self.messages[-MAX_CONVERSATION_MESSAGES:]
+        # Truncate very long messages to save tokens
+        if len(self.messages) > 0:
+            last_msg = self.messages[-1]
+            if len(last_msg.get("text", "")) > 2000:
+                last_msg["text"] = last_msg["text"][:1997] + "..."
 
     def recent(self, limit: int = 8) -> list[dict[str, str]]:
         return self.messages[-limit:]

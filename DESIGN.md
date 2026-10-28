@@ -177,7 +177,7 @@ including the two later department cases for Engineering Elevate and contractor 
 | Choice | Why | Cost |
 |---|---|---|
 | Deterministic policy engine | Precedence and refusal are the highest-risk requirements; they must be unit-testable and stable. | New policy wording needs a code/playbook update, not just a prompt tweak. |
-| Explicit state machine (no LangGraph) | Keeps the single-write gate obvious and avoids framework magic; the brief explicitly allows it. | Less built-in graph tooling; more code to maintain. |
+| LangGraph with a deterministic pipeline | The blueprint's stages are explicit nodes (guard, triage, precedence, retriever, resolver, escalation writer, verifier) and every reply exits through the verifier; the single-write gate stays outside the graph in `approve()`. | Node state is a shared dict; the policy gate runs before retrieval so refusals never retrieve. |
 | SQLite + in-process cache | Zero infrastructure, easy one-command demo, durable drafts. | Single worker only; not horizontally scalable. |
 | Hybrid retrieval | Exact codes and semantics fail in different ways; hybrid covers both. | More moving parts; embedding failures need a fallback. |
 | Playbooks for every manifest code | Deterministic, grounded answers and a no-LLM fallback. | Must be kept in sync when the KB changes. |

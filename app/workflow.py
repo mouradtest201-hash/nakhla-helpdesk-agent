@@ -130,26 +130,123 @@ def _citations(doc_ids: list[str]) -> list[dict[str, Any]]:
     return out
 
 
+@dataclass
+class Staged:
+    """A reply produced by a node; the verifier node checks and finalises it."""
+
+    state: SessionState
+    reply: str
+    state_name: str
+    citations: list[dict[str, Any]]
+    tool_calls: list[ToolCall]
+    usage: dict[str, Any] | None
+    pending: PendingAction | None
+    result: dict[str, Any] | None
+    known_ticket_ids: list[str] | None
+
+
+class GraphState(TypedDict, total=False):
+    session_id: str
+    message: str
+    user: dict[str, Any] | None
+    meter: UsageMeter
+    verdict: Any
+    state: SessionState
+    tool_calls: list[ToolCall]
+    manifest: Any
+    email: str | None
+    employee: Employee | None
+    lookup_failed: bool
+    intake: Any
+    code: str | None
+    status: dict[str, Any] | None
+    decision: Any
+    retrieval: Any
+    play: Any
+    grounded: bool
+    should_draft: bool
+    out: Staged
+    response: ChatResponse
+
+
+_CTX_KEYS = (
+    "meter", "verdict", "state", "tool_calls", "manifest", "user", "email", "employee", "lookup_failed",
+    "intake", "code", "status", "decision", "retrieval", "play", "grounded", "should_draft",
+)
+
+
+def _ctx(g: GraphState) -> tuple:
+    return tuple(g.get(key) for key in _CTX_KEYS)
+
+
+def _after(next_node: str):
+    """Route to the next node, or straight to the verifier once a node produced a reply."""
+
+    def route(g: GraphState) -> str:
+        return "verifier" if g.get("out") is not None else next_node
+
+    return route
+
+
+def _after_resolver(g: GraphState) -> str:
+    if g.get("out") is not None:
+        return "verifier"
+    return "escalation_writer" if g.get("should_draft") else "verifier"
+
+
 class Workflow:
+    """The conversation pipeline from the blueprint, as a LangGraph.
+
+    guard -> triage -> precedence -> retriever -> resolver -> (escalation writer) -> verifier
+
+    Any node can short-circuit to the verifier with a staged reply, so every
+    response passes through the same output checks.  Writes never happen here:
+    the approval executor (`approve`) is the only path to MCP create/note tools.
+    """
+
     def __init__(self) -> None:
-        # Keep the same class interface, but use graph under the hood
         self.graph = self._build()
-        self._wf = None  # placeholder for compatibility
+
+    def _node(self, fn):
+        async def run(g: GraphState) -> dict[str, Any]:
+            out = await fn(g)
+            if isinstance(out, Staged):
+                return {"out": out}
+            return out or {}
+
+        return run
 
     def _build(self):
-        graph = StateGraph(dict)
-        graph.add_node("run", self._run)
-        graph.add_edge(START, "run")
-        graph.add_edge("run", END)
+        graph = StateGraph(GraphState)
+        for name, fn in (
+            ("guard", self._n_guard),
+            ("triage", self._n_triage),
+            ("precedence", self._n_precedence),
+            ("retriever", self._n_retriever),
+            ("resolver", self._n_resolver),
+            ("escalation_writer", self._n_escalation_writer),
+            ("verifier", self._n_verifier),
+        ):
+            graph.add_node(name, self._node(fn))
+        graph.add_edge(START, "guard")
+        graph.add_conditional_edges("guard", _after("triage"), ["triage", "verifier"])
+        graph.add_conditional_edges("triage", _after("precedence"), ["precedence", "verifier"])
+        graph.add_conditional_edges("precedence", _after("retriever"), ["retriever", "verifier"])
+        graph.add_edge("retriever", "resolver")
+        graph.add_conditional_edges("resolver", _after_resolver, ["escalation_writer", "verifier"])
+        graph.add_edge("escalation_writer", "verifier")
+        graph.add_edge("verifier", END)
         return graph.compile()
 
-    async def _run(self, state: dict) -> dict:
-        return state
-
     async def chat(self, session_id: str, message: str, user: dict[str, Any] | None = None) -> ChatResponse:
+        final = await self.graph.ainvoke({"session_id": session_id, "message": message, "user": user})
+        return final["response"]
+
+    async def _n_guard(self, g: GraphState):
+        """Input guardrails, session load, and the 'chat cannot approve' rule."""
         meter = UsageMeter()
-        verdict = inspect(message)
-        state = sessions.get_or_create(session_id)
+        verdict = inspect(g["message"])
+        state = sessions.get_or_create(g["session_id"])
         state.turn += 1
         state.add_message("user", verdict.text)
         tool_calls: list[ToolCall] = []
@@ -165,6 +262,11 @@ class Workflow:
                 reply = f"Nothing has been written yet. To {verb} the pending draft you must use the approval step (`POST /api/approve` with `action_id: {pending.action_id}`); chat messages cannot approve a write on their own."
                 return self._respond(state, reply, "awaiting_approval", [], tool_calls, meter.public(), pending=_pending(pending))
 
+        return {"meter": meter, "verdict": verdict, "state": state, "tool_calls": tool_calls, "manifest": manifest}
+
+    async def _n_triage(self, g: GraphState):
+        """Intent, requester identity (directory), memory/ticket questions, intake facts, status page."""
+        meter, verdict, state, tool_calls, manifest, user, *_ = _ctx(g)
         supplied_email = None
         if isinstance(user, dict):
             value = user.get("email") or user.get("work_email")
@@ -237,6 +339,11 @@ class Workflow:
                     _global_status_cache = status
                     _global_status_cache_time = time.time()
 
+        return {"email": email, "employee": employee, "lookup_failed": lookup_failed, "intake": intake, "code": code, "status": status}
+
+    async def _n_precedence(self, g: GraphState):
+        """Deterministic policy (SP > current > deprecated, department exceptions) and policy-driven short answers."""
+        meter, verdict, state, tool_calls, manifest, user, email, employee, lookup_failed, intake, code, status, *_ = _ctx(g)
         decision = decide(verdict.text, intake, employee, manifest=manifest)
         state.last_intake = intake.model_dump() if hasattr(intake, "model_dump") else intake.__dict__
         state.last_decision = decision.__dict__.copy()
@@ -274,12 +381,21 @@ class Workflow:
             reply, citations = clarify_reply(intake.clarifying_question or "Could you give me the error code and your work email?")
             return self._respond(state, reply, "clarification", citations, tool_calls, meter.public())
 
+        return {"decision": decision}
+
+    async def _n_retriever(self, g: GraphState):
+        """Hybrid retrieval limited to current documents, plus the matching playbook."""
+        meter, verdict, state, tool_calls, manifest, user, email, employee, lookup_failed, intake, code, status, decision, *_ = _ctx(g)
         from app.rag.retriever import retrieve
         query = " ".join(part for part in (code or "", getattr(intake, "symptom", None), getattr(decision, "topic", None)) if part)
         retrieval = await retrieve(query, code=code, department=employee.department if employee else None, force_docs=getattr(decision, "kb_refs", None), manifest=manifest)
         play = playbook_for(code)
         grounded = bool(play or retrieval.docs)
+        return {"retrieval": retrieval, "play": play, "grounded": grounded}
 
+    async def _n_resolver(self, g: GraphState):
+        """Grounded answer with citations, or hand over to the escalation writer."""
+        meter, verdict, state, tool_calls, manifest, user, email, employee, lookup_failed, intake, code, status, decision, retrieval, play, grounded, *_ = _ctx(g)
         should_draft = bool(
             employee
             and ticket_allowed(decision)
@@ -302,7 +418,22 @@ class Workflow:
             reply = "There are already several ticket drafts waiting in this session. Please approve or reject one before I prepare another, so we do not create duplicates."
             return self._respond(state, reply, "awaiting_approval", [], tool_calls, meter.public(), pending=_pending(actions.get(state.pending_action_id or "")))
 
-        if should_draft and grounded:
+        explicit_ticket = getattr(intake, "explicit_ticket_request", False)
+        if should_draft and (grounded or explicit_ticket):
+            return {"should_draft": True}
+
+        if grounded:
+            reply, citations = await troubleshooting_reply(decision, intake, employee, retrieval, meter=meter, use_llm=bool(email))
+        else:
+            reply, citations = unknown_reply(decision, intake, employee)
+
+        return self._respond(state, reply, "answered", citations, tool_calls, meter.public())
+
+    async def _n_escalation_writer(self, g: GraphState):
+        """Schema-valid ticket draft with priority/team from the policy. Never writes; waits for approval."""
+        meter, verdict, state, tool_calls, manifest, user, email, employee, lookup_failed, intake, code, status, decision, retrieval, play, grounded, *_ = _ctx(g)
+
+        if grounded:
             payload, summary = build_ticket(intake, decision, employee, retrieval)
             live = actions.get(state.pending_action_id or "")
             if live is not None and live.status == "proposed" and live.type == "create_ticket" and (live.payload or {}).get("subject") == payload.get("subject"):
@@ -319,19 +450,12 @@ class Workflow:
                 remember(email, "last_draft", {"action_id": action.action_id, "summary": summary})
             return self._respond(state, reply, "awaiting_approval", citations, tool_calls, meter.public(), pending=_pending(action))
 
-        if should_draft and not grounded and getattr(intake, "explicit_ticket_request", False):
+        if not grounded:
             payload, summary = build_ticket(intake, decision, employee, retrieval)
             action = actions.create(state.session_id, "create_ticket", summary, payload)
             state.pending_action_id = action.action_id
             reply = f"I found no documented fix for **{code or 'this problem'}** in the current knowledge base, so I have prepared an escalation ticket instead of inventing steps.\n\n" + draft_reply(summary, payload, getattr(decision, "assigned_team", None))
             return self._respond(state, reply, "awaiting_approval", _citations(getattr(decision, "kb_refs", []) or []), tool_calls, meter.public(), pending=_pending(action))
-
-        if grounded:
-            reply, citations = await troubleshooting_reply(decision, intake, employee, retrieval, meter=meter, use_llm=bool(email))
-        else:
-            reply, citations = unknown_reply(decision, intake, employee)
-
-        return self._respond(state, reply, "answered", citations, tool_calls, meter.public())
 
     async def approve(self, session_id: str, action_id: str | None, approved: bool) -> ChatResponse:
         meter = UsageMeter()
@@ -339,11 +463,11 @@ class Workflow:
         action_id = action_id or state.pending_action_id
         if not action_id:
             reply = "There is no pending action in this session, so there is nothing to approve and nothing was written. Describe the problem again and I can prepare a draft."
-            return self._respond(state, reply, "answered", [], [], meter.public())
+            return self._finalize(self._respond(state, reply, "answered", [], [], meter.public()))
         action = actions.get(action_id)
         if action is None or action.session_id != session_id:
             reply = f"I don't have a pending action **{action_id}** in this session, so there is nothing to approve and nothing was written. If a draft was already approved, its ticket id is in the earlier reply; otherwise describe the problem again and I can prepare a new draft."
-            return self._respond(state, reply, "answered", [], [], meter.public())
+            return self._finalize(self._respond(state, reply, "answered", [], [], meter.public()))
 
         tool_calls: list[ToolCall] = []
         citations = _citations(list((action.payload or {}).get("kb_refs") or []))
@@ -368,7 +492,7 @@ class Workflow:
                 state.pending_action_id = None
                 reply = rejected_reply()
                 state_name = "cancelled"
-            return self._respond(state, reply, state_name, citations, tool_calls, meter.public(), result=result, pending=pending)
+            return self._finalize(self._respond(state, reply, state_name, citations, tool_calls, meter.public(), result=result, pending=pending))
 
         claim, action = actions.begin(action_id)
         if claim == "missing" or action is None:
@@ -428,7 +552,7 @@ class Workflow:
                 pending = _pending(actions.get(action_id))
                 state_name = "failed"
 
-        return self._respond(state, reply, state_name, citations, tool_calls, meter.public(), result=result, pending=pending)
+        return self._finalize(self._respond(state, reply, state_name, citations, tool_calls, meter.public(), result=result, pending=pending))
 
     def _answer_memory(self, state: SessionState, meter: UsageMeter, employee: Employee) -> ChatResponse:
         facts = recall(employee.email, limit=8)
@@ -501,8 +625,17 @@ class Workflow:
             lines.append(f"- Notes: {len(ticket['notes'])}")
         return self._respond(state, "\n".join(lines), "answered", [], tool_calls, meter.public(), known_ticket_ids=[real_ticket_id])
 
-    def _respond(self, state: SessionState, reply: str, state_name: str, citations=None, tool_calls=None, usage=None, pending=None, result=None, known_ticket_ids=None):
-        citations = citations or []
+    def _respond(self, state: SessionState, reply: str, state_name: str, citations=None, tool_calls=None, usage=None, pending=None, result=None, known_ticket_ids=None) -> Staged:
+        return Staged(state, reply, state_name, citations or [], tool_calls or [], usage, pending, result, known_ticket_ids)
+
+    async def _n_verifier(self, g: GraphState):
+        """Output guardrails: citation allow-list, no unbacked ticket IDs, secret redaction."""
+        return {"response": self._finalize(g["out"])}
+
+    def _finalize(self, staged: Staged) -> ChatResponse:
+        state, reply, state_name = staged.state, staged.reply, staged.state_name
+        citations, tool_calls, usage = staged.citations, staged.tool_calls, staged.usage
+        pending, result, known_ticket_ids = staged.pending, staged.result, staged.known_ticket_ids
         clean, kept, warnings = guard_reply(reply, citations=citations, result=result, known_ticket_ids=known_ticket_ids)
         if warnings:
             log.debug("output guard: %s", warnings)

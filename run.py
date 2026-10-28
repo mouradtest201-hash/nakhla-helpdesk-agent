@@ -4,7 +4,8 @@ Starts, in order:
 
 1. the simulated helpdesk API on :8102 (system of record),
 2. this project's FastAPI agent on :8000,
-3. the Gradio client on :7860 (optional, skipped with ``--no-ui``).
+3. the Next.js web client on :3000 (skipped with ``--no-ui``; use
+   ``--legacy-ui`` for the old Gradio client on :7860).
 
 Run it from the repository root with the project venv:
 
@@ -64,7 +65,14 @@ def wait_for_health(url: str, seconds: float = 40.0) -> bool:
     return False
 
 
-def start(name: str, command: list[str], *, port: int, health: str | None = None) -> bool:
+def start(
+    name: str,
+    command: list[str],
+    *,
+    port: int,
+    health: str | None = None,
+    cwd: Path = ROOT,
+) -> bool:
     if port_open(port):
         say(f"{name} is already listening on :{port}; reusing it.")
         if health and not wait_for_health(health, 10):
@@ -72,7 +80,7 @@ def start(name: str, command: list[str], *, port: int, health: str | None = None
             return False
         return True
     say(f"Starting {name} on :{port} ...")
-    process = subprocess.Popen(command, cwd=ROOT)
+    process = subprocess.Popen(command, cwd=cwd)
     CHILDREN.append((name, process))
     if health:
         if not wait_for_health(health):
@@ -87,7 +95,14 @@ def stop_all() -> None:
         if process.poll() is not None:
             continue
         say(f"Stopping {name} ...")
-        process.terminate()
+        if os.name == "nt":
+            # npm.cmd spawns node; terminate() would leave the child running
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+            )
+        else:
+            process.terminate()
         try:
             process.wait(timeout=8)
         except subprocess.TimeoutExpired:
@@ -96,7 +111,10 @@ def stop_all() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start the Nakhla IT Helpdesk Agent stack.")
-    parser.add_argument("--no-ui", action="store_true", help="do not start the Gradio client")
+    parser.add_argument("--no-ui", action="store_true", help="do not start any web client")
+    parser.add_argument(
+        "--legacy-ui", action="store_true", help="start the old Gradio client instead of the Next.js app"
+    )
     parser.add_argument("--no-helpdesk", action="store_true", help="use an already running helpdesk API")
     args = parser.parse_args()
 
@@ -121,7 +139,8 @@ def main() -> int:
         ):
             return 1
 
-        if not args.no_ui:
+        ui_url = ""
+        if not args.no_ui and args.legacy_ui:
             try:
                 import gradio  # noqa: F401
             except ImportError:
@@ -132,12 +151,24 @@ def main() -> int:
                     [python, "ui/app_ui.py"],
                     port=int(os.getenv("UI_PORT", "7860")),
                 )
+                ui_url = "http://localhost:7860"
+        elif not args.no_ui:
+            npm = shutil.which("npm")
+            web = ROOT / "web"
+            if not npm:
+                say("Node.js/npm not found; skipping the web UI. Install Node or use --legacy-ui.")
+            else:
+                if not (web / "node_modules").exists():
+                    say("Installing web dependencies (first run) ...")
+                    subprocess.run([npm, "install"], cwd=web, check=True)
+                start("web UI", [npm, "run", "dev"], port=3000, cwd=web)
+                ui_url = "http://localhost:3000"
 
         say("")
         say("Agent API : http://localhost:8000/docs")
         say("Helpdesk  : http://localhost:8102/docs")
-        if not args.no_ui:
-            say("UI        : http://localhost:7860")
+        if ui_url:
+            say(f"UI        : {ui_url}")
         say("Press Ctrl+C to stop.")
         while True:
             time.sleep(0.6)

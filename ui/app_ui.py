@@ -18,7 +18,207 @@ import httpx
 
 APP_URL = os.getenv("APP_URL", "http://localhost:8000").rstrip("/")
 DEFAULT_EMAIL = os.getenv("UI_DEFAULT_EMAIL", "tariq.hamdan@nakhla.example")
-NO_CARD = "_No ticket draft waiting for approval._"
+NO_CARD = (
+    "### No draft to review\n"
+    "If this issue needs a ticket, the assistant will prepare one here. "
+    "Nothing is submitted without your approval."
+)
+
+APP_CSS = """
+.gradio-container {
+    --harbor: #123D3D;
+    --palm: #33715B;
+    --date: #B79B59;
+    --mist: #EFF5F3;
+    --paper: #FBFCFA;
+    --ink: #1B2A28;
+    max-width: 1500px;
+    margin: 0 auto;
+    padding: 28px clamp(16px, 4vw, 56px) 48px;
+    color: var(--ink);
+    background: var(--paper);
+    font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.gradio-container h1,
+.gradio-container h2,
+.gradio-container h3 {
+    color: var(--harbor);
+    letter-spacing: -0.035em;
+}
+
+.gradio-container .masthead {
+    align-items: center;
+    padding-bottom: 20px;
+    margin-bottom: 34px;
+    border-bottom: 1px solid #DCE7E2;
+}
+
+.gradio-container .brand-mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 4px 14px 4px 14px;
+    background: var(--harbor);
+    color: white;
+    font-size: 22px;
+    font-weight: 700;
+}
+
+.gradio-container .brand-mark p {
+    margin: 0;
+}
+
+.gradio-container .brand-copy h2 {
+    margin: 0;
+    font-size: 21px;
+    line-height: 1.15;
+}
+
+.gradio-container .brand-copy p {
+    margin: 3px 0 0;
+    color: #526661;
+    font-size: 13px;
+}
+
+.gradio-container .intro {
+    margin-bottom: 24px;
+}
+
+.gradio-container .intro h1 {
+    margin: 0 0 8px;
+    font-size: clamp(29px, 3.2vw, 42px);
+    line-height: 1.08;
+}
+
+.gradio-container .intro p {
+    max-width: 640px;
+    color: #526661;
+    line-height: 1.6;
+}
+
+.gradio-container .workspace {
+    align-items: flex-start;
+    gap: 28px;
+}
+
+.gradio-container .review-rail {
+    padding: 20px;
+    border: 1px solid #DCE7E2;
+    border-top: 3px solid var(--palm);
+    border-radius: 4px;
+    background: #F5F8F6;
+}
+
+.gradio-container .review-rail h2,
+.gradio-container .review-rail h3 {
+    margin-top: 0;
+}
+
+.gradio-container #conversation {
+    overflow: hidden;
+    border: 1px solid #DCE7E2;
+    border-radius: 4px;
+    background: white;
+}
+
+.gradio-container #ticket-card {
+    min-height: 126px;
+    padding: 16px;
+    border: 1px solid #DCE7E2;
+    border-radius: 4px;
+    background: white;
+}
+
+.gradio-container #ticket-card h3 {
+    margin-top: 0;
+    font-size: 17px;
+}
+
+.gradio-container #approve-ticket button {
+    min-height: 46px;
+    background: var(--palm);
+    color: white;
+}
+
+.gradio-container #reject-ticket button {
+    min-height: 46px;
+    border: 1px solid #9AACA5;
+    background: white;
+    color: var(--ink);
+}
+
+.gradio-container button,
+.gradio-container input,
+.gradio-container textarea {
+    border-radius: 4px;
+}
+
+.gradio-container button {
+    transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.gradio-container button:focus-visible,
+.gradio-container input:focus-visible,
+.gradio-container textarea:focus-visible {
+    outline: 3px solid var(--date);
+    outline-offset: 2px;
+}
+
+.gradio-container .suggestions {
+    margin-top: 10px;
+}
+
+.gradio-container .suggestions button {
+    border: 1px solid #C9D9D2;
+    background: var(--mist);
+    color: var(--harbor);
+}
+
+.gradio-container .support-details {
+    margin-top: 14px;
+    border-top: 1px solid #DCE7E2;
+}
+
+.gradio-container code,
+.gradio-container pre {
+    font-family: "IBM Plex Mono", Consolas, monospace;
+}
+
+@media (max-width: 800px) {
+    .gradio-container {
+        padding: 18px 14px 32px;
+    }
+
+    .gradio-container .masthead {
+        margin-bottom: 24px;
+    }
+
+    .gradio-container .workspace {
+        flex-direction: column;
+        gap: 18px;
+    }
+
+    .gradio-container .workspace > * {
+        width: 100%;
+    }
+
+    .gradio-container .review-rail {
+        padding: 16px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .gradio-container *,
+    .gradio-container *::before,
+    .gradio-container *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+"""
 
 EXAMPLES = [
     ["NakhlaID says NID-423 when I try to sign in. What should I do?"],
@@ -141,42 +341,66 @@ def reset(history: list):
     )
 
 
-with gr.Blocks(title="Nakhla IT Helpdesk Agent") as demo:
+with gr.Blocks(title="Nakhla IT Helpdesk") as demo:
     session = gr.State(lambda: f"ui-{uuid.uuid4().hex[:10]}")
     pending_state = gr.State(None)
 
+    with gr.Row(elem_classes=["masthead"]):
+        gr.Markdown("N", elem_classes=["brand-mark"])
+        gr.Markdown("## Nakhla\nIT support", elem_classes=["brand-copy"])
+        reset_btn = gr.Button("Start a new chat", scale=0)
+
     gr.Markdown(
-        "## Nakhla IT Helpdesk\n"
-        "Grounded IT support for Nakhla Systems (a fictional company). Answers cite current KB/SP "
-        "documents; any ticket is **drafted first** and only written after you approve it.\n\n"
-        f"`{APP_URL}`"
+        "# What is getting in the way?\n"
+        "Describe the error or question. I’ll check current Nakhla guidance and show you "
+        "any ticket draft before it is created.",
+        elem_classes=["intro"],
     )
-    with gr.Row():
-        with gr.Column(scale=3):
+
+    with gr.Row(elem_classes=["workspace"]):
+        with gr.Column(scale=3, min_width=340):
             with gr.Row():
                 email = gr.Textbox(
-                    label="Your work email",
+                    label="Work email",
                     value=DEFAULT_EMAIL,
                     scale=4,
-                    info="Used for department rules, VIP priority and ticket history.",
+                    info="Used to check department guidance and your ticket history.",
                 )
-                reset_btn = gr.Button("New session", scale=1)
-            chat = gr.Chatbot(label="Chat", height=430)
+            chat = gr.Chatbot(label="Conversation", height=480, elem_id="conversation")
             msg = gr.Textbox(
-                label="Message",
+                label="Message for IT support",
                 placeholder="Describe the IT problem, e.g. NakhlaConnect shows NX-781",
                 submit_btn=True,
             )
-            gr.Examples(examples=EXAMPLES, inputs=msg)
-        with gr.Column(scale=2):
+            with gr.Group(elem_classes=["suggestions"]):
+                gr.Examples(
+                    examples=EXAMPLES,
+                    inputs=msg,
+                    label="Start with a common issue",
+                    examples_per_page=4,
+                )
+        with gr.Column(scale=2, min_width=300, elem_classes=["review-rail"]):
+            gr.Markdown("### Ticket approval\nReview any proposed ticket before it is sent.")
             with gr.Group():
-                card = gr.Markdown(NO_CARD, padding=True)
+                card = gr.Markdown(NO_CARD, elem_id="ticket-card")
                 with gr.Row():
-                    approve_btn = gr.Button("Approve write", variant="primary", interactive=False)
-                    reject_btn = gr.Button("Reject", variant="stop", interactive=False)
+                    approve_btn = gr.Button(
+                        "Approve and create ticket",
+                        variant="primary",
+                        interactive=False,
+                        elem_id="approve-ticket",
+                    )
+                    reject_btn = gr.Button(
+                        "Reject draft",
+                        variant="secondary",
+                        interactive=False,
+                        elem_id="reject-ticket",
+                    )
             outcome = gr.Markdown("")
-            sources = gr.Markdown("### Sources\n_No answer yet._")
-            tools = gr.Markdown("### Tool calls (last turn)\n_none_")
+            with gr.Accordion("Sources", open=False, elem_classes=["support-details"]):
+                sources = gr.Markdown("_No answer yet._")
+            with gr.Accordion("System activity", open=False, elem_classes=["support-details"]):
+                tools = gr.Markdown("_No activity yet._")
 
     outputs = [chat, pending_state, card, approve_btn, reject_btn, sources, tools, outcome]
     msg.submit(send, [msg, chat, session, email], [msg, *outputs])
@@ -192,4 +416,5 @@ if __name__ == "__main__":
     demo.launch(
         server_name=os.getenv("UI_HOST", "127.0.0.1"),
         server_port=int(os.getenv("UI_PORT", "7860")),
+        css=APP_CSS,
     )

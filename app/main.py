@@ -27,7 +27,7 @@ from app.mcp.client import mcp_client
 from app.memory.db import init_db
 from app.models import ApproveRequest, ChatRequest, ChatResponse
 from app.rag.store import ensure_index, index_status
-from app.workflow import WorkflowError, workflow
+from app.graph import AgentError, helpdesk_agent
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -149,12 +149,12 @@ async def status() -> dict:
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse | JSONResponse:
     try:
-        return await workflow.chat(
+        return await helpdesk_agent.chat(
             session_id=request.session_id,
             message=request.message,
             user=request.user,
         )
-    except WorkflowError as exc:
+    except AgentError as exc:
         return JSONResponse(
             status_code=exc.status_code,
             content=ChatResponse(
@@ -181,12 +181,12 @@ async def chat(request: ChatRequest) -> ChatResponse | JSONResponse:
 @app.post("/api/approve", response_model=ChatResponse)
 async def approve(request: ApproveRequest) -> ChatResponse | JSONResponse:
     try:
-        return await workflow.approve(
+        return await helpdesk_agent.approve(
             session_id=request.session_id,
             action_id=request.action_id,
             approved=request.approved,
         )
-    except WorkflowError as exc:
+    except AgentError as exc:
         return JSONResponse(
             status_code=exc.status_code,
             content=ChatResponse(

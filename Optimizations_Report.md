@@ -50,7 +50,7 @@ The application is well-architected with good separation of concerns. There are 
 
 | Optimization | Impact | Effort | Priority | Details |
 |--------------|--------|--------|----------|---------|
-| **Parallelize independent calls** | HIGH | LOW | P0 | In workflow, some MCP calls could be parallelized (e.g., status + other checks) |
+| **Parallelize independent calls** | HIGH | LOW | P0 | In the agent graph, some MCP calls could be parallelized (e.g., status + other checks) |
 | **Optimize retrieval** | HIGH | MEDIUM | P0 | BM25 is in-memory which is good; could optimize scoring, add early termination |
 | **Cache service status longer** | MEDIUM | LOW | P0 | Status cached 120s per session - could increase or use global cache |
 | **Reduce DB round trips** | MEDIUM-HIGH | LOW | P0 | Batch session saves, use connection pooling better |
@@ -63,7 +63,8 @@ The application is well-architected with good separation of concerns. There are 
 **Estimated Improvement:** 20-40% reduction in response time
 
 ### Specific Code Improvements
-- In `workflow.py` line ~275: Status check could be cached globally across sessions
+- In `app/graph/chat.py` (`service_status`): status is cached per session; a shared cache would
+  suppress the `get_service_status` calls that incident evals assert, so correctness wins
 - In `retriever.py`: Could parallelize embedding generation and BM25
 - In `sessions.py`: Consider in-memory cache with TTL instead of DB reads on every access
 
@@ -71,7 +72,7 @@ The application is well-architected with good separation of concerns. There are 
 
 ### Current State
 - Comprehensive feature set
-- Good state machine design
+- Good LangGraph graph design
 - Deterministic policy engine
 - Works without LLM key
 
@@ -105,7 +106,7 @@ The application is well-architected with good separation of concerns. There are 
 ### Quick Wins (High Impact, Low Effort)
 
 1. **Reduce session history in prompts** (tokens) - In agents, limit history passed to LLM
-2. **Cache status globally** (speed) - Move status cache from per-session to global with TTL
+2. **Keep status cache session-scoped** (speed + correctness) - It is already cached for 120s per session
 3. **Parallel tool calls** (speed) - Use `asyncio.gather` where independent
 4. **Optimize DB writes** (speed) - Batch message inserts
 
@@ -136,7 +137,7 @@ The application is well-architected with good separation of concerns. There are 
 **Do First (P0):**
 - Reduce context window size
 - Parallelize independent async calls
-- Global status cache
+- Session status cache
 - Prompt compression
 
 **Do Second (P1):**

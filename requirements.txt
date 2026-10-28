@@ -23,8 +23,8 @@ gradio==6.30.0
 python-dotenv==1.2.4
 numpy==2.5.4
 
-# Your agent framework (the versions the course used)
-# LangGraph (or plain Python) for the agent; the openai SDK talks to OpenRouter
-# (chat + embeddings). evals/run_evals.py --judge also uses openai.
+# Agent orchestration: LangGraph compiles the chat and approval state graphs;
+# the openai SDK talks to OpenRouter (chat + embeddings).
+# evals/run_evals.py --judge also uses openai.
 langgraph==1.2.10
 openai==2.52.0

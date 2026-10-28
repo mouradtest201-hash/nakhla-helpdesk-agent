@@ -10,25 +10,28 @@ dataset are the provided kit and are **not modified**; everything under `app/`, 
 and `ui/` is the implementation.
 
 ```
-employee ── POST /api/chat ──► intake ──► retrieval ──► policy engine ──► resolver
-                                  │           │              │
-                                  │           │              └─ category / priority / refusals
-                                  │           └─ exact code + BM25 + embeddings, current docs only
-                                  └─ employee, status page, ticket history over MCP
+employee ── POST /api/chat ──► chat LangGraph
+                                ├─ input guard / identity / long-term memory
+                                ├─ intake ──► service status ──► policy engine
+                                ├─ refusal / incident / clarification branches
+                                └─ retrieval ──► resolver or ticket draft
 
           ◄── reply + citations + pending_action ──┘
-employee ── POST /api/approve ──► approval gate ──► MCP create_ticket (idempotency_key = action_id)
+
+employee ── POST /api/approve ──► approval LangGraph
+                                   └─ atomic claim ──► MCP create_ticket
+                                                      (idempotency_key = action_id)
 ```
 
 ## What it does
 
 | Requirement | Implementation |
 |---|---|
-| **Real agentic workflow, 2+ roles** | Three explicit roles: **intake** (structured facts), **resolver** (grounded answer), **escalator** (schema-valid ticket draft). A deterministic state machine coordinates them and can run without the LLM. |
+| **LangGraph agent graph, 2+ roles** | Three explicit roles: **intake** (structured facts), **resolver** (grounded answer), **escalator** (schema-valid ticket draft). A compiled LangGraph `StateGraph` coordinates them with explicit nodes and conditional edges, and can run without the LLM. |
 | **MCP + a real API** | The app talks MCP stdio to `services/helpdesk_mcp.py`: `lookup_employee`, `get_service_status`, `search_tickets`, `get_ticket`, `create_ticket`, `add_ticket_note`. The last two are **only** reachable from the approval gate. |
 | **Short- and long-term memory** | Short term: persisted session turns, last intake/decision, pending action and status cache (SQLite + in-process cache). Long term: employee profile cache, saved preferences, draft/ticket facts, and ticket history fetched from the helpdesk. |
 | **Guardrails + approval gate** | Input checks, untrusted-source scrubbing, prompt-injection handling, secret redaction, citation allow-list, no unbacked ticket IDs, strict policy refusals, and a single write path. |
-| **10+ evals, scorecard, fixed failure** | 10 provided cases **10/10**, 20 additional cases **20/20**, 24 unit tests, and eight targeted hardening fixes (see [Evaluation](#evaluation)). |
+| **10+ evals, scorecard, fixed failure** | 10 provided cases **10/10**, 20 additional cases **20/20**, 27 unit tests, and eight targeted hardening fixes (see [Evaluation](#evaluation)). |
 | **Contract + one-command start + UI** | `GET /health`, `POST /api/chat`, `POST /api/approve`; `.\run.ps1`, `./run.sh`, or `docker compose up --build`; Gradio client with sources, tool calls and a draft-approval card. |
 
 ## Quick start
@@ -195,9 +198,9 @@ Final local results (one run, no judging):
 
 | Suite | Result |
 |---|---|
-| Provided sample cases | **10/10 (100%)** - avg turn 3.22 s, p95 4.84 s |
-| Additional cases (`evals/cases.extra.jsonl`) | **20/20 (100%)** - avg turn 3.21 s, p95 5.40 s |
-| Unit tests | **24 passed** |
+| Provided sample cases | **10/10 (100%)** - avg turn 2.84 s, p95 4.42 s |
+| Additional cases (`evals/cases.extra.jsonl`) | **20/20 (100%)** - avg turn 2.84 s, p95 4.35 s |
+| Unit tests | **27 passed** |
 
 The extra cases cover precedence, department exceptions, VIP/4-user priority, PDF-only KB pages,
 contractor refusals, HR privacy, prompt injection, admin credentials, onboarding priority,
@@ -218,7 +221,13 @@ which previously produced the wrong message for unknown users.
 ```
 app/
   main.py                 FastAPI contract + background warm-up
-  workflow.py             state machine, approval gate, memory/ticket-history paths
+  graph/
+    agent.py              compiled chat + approval LangGraph state graphs
+    state.py              typed graph state
+    chat.py               read-only conversation/intake/policy/retrieval nodes
+    approval.py           atomic claim + write nodes (the only write path)
+    common.py             response/guard/citation helpers shared by nodes
+    errors.py             request-level agent errors
   models.py               Chat/Approve/TicketDraft/Employee models
   config.py, llm.py       OpenRouter client, graceful no-key fallback
   agents/                 intake, resolver, escalator (three roles)
@@ -229,7 +238,7 @@ app/
   mcp/client.py            MCP stdio client
 dataset/, services/        provided kit (unchanged)
 evals/                     shared runner, 10 sample + 20 extra cases
-tests/                     24 unit tests
+tests/                     unit tests (policy, guardrails, knowledge base, graph)
 ui/app_ui.py               Gradio client (sources, tools, approve/reject card)
 run.py, run.ps1, run.sh    one-command local start
 Dockerfile                 app image; docker-compose.yml starts helpdesk + app + UI
@@ -242,9 +251,7 @@ docs/KIT.md                original kit documentation
 - **Deterministic policy, model for language.** The highest-risk requirement is precedence, so it is
   testable code, not a prompt. The model may extract nuance and polish prose, but it cannot change a
   category, priority, route, refusal or citation. The app still works with no API key.
-- **Explicit state machine instead of a framework.** The brief allows a graph, a crew, or your own
-  loop. A small explicit machine keeps the single-write invariant obvious and avoids framework
-  behaviour hiding the approval gate.
+- **LangGraph orchestrates the agent.** `app/graph/chat.py` and `app/graph/approval.py` are separate compiled `StateGraph`s. Routing is expressed as conditional edges (guard → identity → intake → policy → incident/clarification → retrieval → draft/resolve), not as a procedural dispatcher. The approval graph is the only graph with write nodes, so chat cannot reach `create_ticket` or `add_ticket_note`.
 - **MCP is the only path to the system of record.** The app does not call the helpdesk REST API
   directly, and the model never receives a write tool.
 - **Honest failure over confident nonsense.** Tool failures, unknown codes, not-found employees and

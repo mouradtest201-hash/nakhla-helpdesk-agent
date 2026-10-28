@@ -26,7 +26,7 @@ helps.
 | Layer | Modules | Responsibility |
 |---|---|---|
 | Contract | `app/main.py`, `app/models.py` | `GET /health`, `POST /api/chat`, `POST /api/approve`; pydantic validation; error envelopes. |
-| Orchestration | `app/workflow.py` | Explicit state machine, MCP calls, memory, approval gate, response assembly. |
+| Orchestration | `app/graph/*` | Two compiled LangGraph `StateGraph`s: read-only chat graph and approval graph; MCP calls, memory, approval gate, response assembly. |
 | Roles | `app/agents/intake.py`, `resolver.py`, `escalator.py` | Structured extraction → grounded reply → schema-valid draft. |
 | Domain | `app/domain/manifest.py`, `playbooks.py`, `policy.py` | Current-document manifest, verified playbooks, precedence/category/priority/refusal rules. |
 | Retrieval | `app/rag/*` | Markdown/PDF ingestion, 111 chunks, exact-code + BM25 + embeddings, metadata filters. |
@@ -35,24 +35,48 @@ helps.
 | Systems access | `app/mcp/client.py` + `services/helpdesk_mcp.py` | MCP stdio only; no direct REST calls from the agent. |
 | Clients / proof | `ui/app_ui.py`, `evals/*`, `tests/*` | Gradio client, shared-contract evals, unit tests. |
 
-## 3. Workflow state machine
+## 3. LangGraph orchestration
+
+The agent is implemented as two compiled `StateGraph`s. The distinction is deliberate: the chat
+graph cannot reach a write tool, while the approval graph is the only place where `create_ticket` or
+`add_ticket_note` exists.
 
 ```
-chat ──► input_guard ──► identity (email / directory) ──► long-term memory intents
-             │                    │
-             │                    ├─ 404 employee → explain, no write
-             │                    └─ 5xx directory → honest “could not check”, no write
-             ▼
-      retrieval ──► policy_decision ──► refusal? ──► refused
-             │            │
-             │            ├─ active incident → incident reply, no duplicate ticket
-             │            ├─ policy refusal → refused
-             │            └─ normal → resolver (grounded answer)
-             │
-             └─ should draft? ──► escalator → pending_action (awaiting_approval)
+CHAT GRAPH
+START ──► input_guard ──► pending_gate ──► identity ──► preference_intent
+              │               │                │
+              │               │                └─► classify_memory_intent
+              │               │                         ├─► recall_memory  ─┐
+              │               │                         ├─► list_tickets   ─┤
+              │               │                         └─► ticket_followup ─┤
+              │               └─ halt ───────────────────────────────────────┤
+              └─ blocked ────────────────────────────────────────────────────┤
+                                                                               ▼
+       intake ──► service_status ──► policy ──► refusal / identity_failure ──► finalize
                                       │
-approve ──► atomic claim ──► MCP write ──► completed (result) / failed (retryable)
+                                      └─► phone_policy ──► software_policy ──► incident
+                                                ──► clarification ──► retrieve
+                                                                          │
+                                                          should_draft? ──┴──► draft_guard ──► escalate
+                                                                          └──► resolve
+                                                                                   │
+                                                                                   ▼
+                                                                                finalize
+
+APPROVAL GRAPH
+START ──► load_action ──► reject_action ───────────────────────────────┐
+              │                                                        │
+              └─ approved ──► claim_action ──► write_ticket ──► ticket_success
+                                      │       └─► write_note ──► note_success
+                                      ├─► already_executed / already_executing / already_rejected
+                                      └─► write_failure ──────────────────────────┤
+                                                                                  ▼
+                                                                               finalize
 ```
+
+The graph state is a typed `AgentState` (`app/graph/state.py`). Session objects and the usage meter
+are runtime context in `config["configurable"]`; they are not serialized into graph state because
+they outlive one invocation. Read-only nodes append to `tool_calls` with a LangGraph reducer.
 
 Public states used in responses: `answered`, `clarification`, `awaiting_approval`, `refused`,
 `completed`, `cancelled`, `failed`, `error`.
@@ -61,7 +85,8 @@ Important invariants:
 
 - `/api/chat` is **read-only** with respect to the ticket system.
 - One pending action per session is the normal case; the session refuses to pile up drafts.
-- `/api/approve` is the only code path that calls `create_ticket` or `add_ticket_note`.
+- `/api/approve` invokes the approval graph, the only graph with `create_ticket` / `add_ticket_note`
+  nodes and therefore the only code path that can write.
 - `pending_action.payload` is exactly what will be sent on approval, plus the idempotency key.
 - `result` is `null` unless the system of record returned a ticket ID.
 
@@ -161,15 +186,15 @@ citations, `pending_action`, `result`, ticket counts, categories, priorities and
   priority, HR privacy, prompt injection, admin credentials, deprecated phone reset, PDF-only
   printing, onboarding P2/P3, long-term memory, double approval, lost-phone security, unknown code,
   Engineering Elevate and contractor software.
-- 24 unit tests: policy decisions, guardrails, manifest/index properties, escalator schema and
-  priority.
+- 27 unit tests: policy decisions, guardrails, manifest/index properties, escalator schema and
+  priority, plus the LangGraph node/edge structure and conditional routing.
 
 The initial extra run scored 13/18. The root cause of four failures was presentation, not retrieval:
 the approval response dropped the draft's citations, and the draft card did not show the routing
 team. The fix was to carry `kb_refs` through the approval response and include the assigned team in
 the draft. The fifth failure was a stale running process; after restart the new security references
 appeared. A separate real bug found during manual checks was that an unknown employee was reported as
-a directory outage; the workflow now distinguishes a 404 from a 5xx. The suite now runs **20/20**,
+a directory outage; the agent graph now distinguishes a 404 from a 5xx. The suite now runs **20/20**,
 including the two later department cases for Engineering Elevate and contractor software.
 
 ## 9. Trade-offs
@@ -177,7 +202,7 @@ including the two later department cases for Engineering Elevate and contractor 
 | Choice | Why | Cost |
 |---|---|---|
 | Deterministic policy engine | Precedence and refusal are the highest-risk requirements; they must be unit-testable and stable. | New policy wording needs a code/playbook update, not just a prompt tweak. |
-| Explicit state machine (no LangGraph) | Keeps the single-write gate obvious and avoids framework magic; the brief explicitly allows it. | Less built-in graph tooling; more code to maintain. |
+| LangGraph `StateGraph` | Explicit nodes and conditional edges make every branch and the single-write gate reviewable; the graph can be visualised and tested. | A framework dependency and a little more wiring than a linear script. |
 | SQLite + in-process cache | Zero infrastructure, easy one-command demo, durable drafts. | Single worker only; not horizontally scalable. |
 | Hybrid retrieval | Exact codes and semantics fail in different ways; hybrid covers both. | More moving parts; embedding failures need a fallback. |
 | Playbooks for every manifest code | Deterministic, grounded answers and a no-LLM fallback. | Must be kept in sync when the KB changes. |

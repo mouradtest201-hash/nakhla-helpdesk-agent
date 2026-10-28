@@ -71,7 +71,7 @@ def side_panels(data: dict) -> tuple[str, str, str]:
     if result:
         outcome = "### Result\n" + "\n".join(f"- **{k}**: `{v}`" for k, v in result.items())
     if state:
-        outcome += f"\n\n_Workflow state: `{state}`_"
+        outcome += f"\n\n_Agent graph state: `{state}`_"
     return sources, tools, outcome
 
 

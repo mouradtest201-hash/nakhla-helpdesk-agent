@@ -8,8 +8,8 @@ with the helpdesk API URL/key passed through the environment.  One session is
 kept open for the app's lifetime; a reconnect is attempted if the child dies.
 
 Writes (``create_ticket`` / ``add_ticket_note``) are deliberately callable only
-from the approval service.  The workflow module never imports this client
-directly for writes; it goes through ``ActionService``.
+from the approval graph.  The chat graph never calls a write tool; the approval
+nodes are the single write path.
 """
 from __future__ import annotations
 

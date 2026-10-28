@@ -33,7 +33,7 @@ helps.
 | Guardrails | `app/guardrails/*` | Input inspection, untrusted-text scrubbing, output redaction/citation/ticket-ID checks. |
 | Memory | `app/memory/*` | SQLite sessions, employee facts, atomic proposed/executing/executed actions. |
 | Systems access | `app/mcp/client.py` + `services/helpdesk_mcp.py` | MCP stdio only; no direct REST calls from the agent. |
-| Clients / proof | `ui/app_ui.py`, `evals/*`, `tests/*` | Gradio client, shared-contract evals, unit tests. |
+| Clients / proof | `web/`, `evals/*`, `tests/*` | Next.js client, shared-contract evals, unit tests. |
 
 ## 3. Workflow state machine
 

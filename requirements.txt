@@ -16,9 +16,6 @@ pydantic-settings==2.14.2
 PyYAML==6.0.3
 pymupdf==1.28.2
 
-# UI starter (ui/app_ui.py)
-gradio==6.30.0
-
 # Retrieval helpers: .env loading and vector math (a Module 6 style store)
 python-dotenv==1.2.4
 numpy==2.5.4

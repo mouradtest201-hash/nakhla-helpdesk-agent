@@ -1,6 +1,7 @@
 # One command starts the whole stack:
 #   docker compose up --build
-#   agent API: http://localhost:8000/docs   UI: http://localhost:7860   helpdesk: http://localhost:8102/docs
+#   agent API: http://localhost:8000/docs   helpdesk: http://localhost:8102/docs
+#   (web UI: run `npm run dev` in web/, it proxies to the agent on :8000)
 services:
   helpdesk-api:
     build:
@@ -29,22 +30,6 @@ services:
       - app-data:/app/data
     depends_on:
       helpdesk-api:
-        condition: service_healthy
-    restart: unless-stopped
-
-  ui:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: ["python", "ui/app_ui.py"]
-    ports:
-      - "7860:7860"
-    environment:
-      APP_URL: http://app:8000
-      UI_HOST: 0.0.0.0
-      UI_PORT: 7860
-    depends_on:
-      app:
         condition: service_healthy
     restart: unless-stopped
 

@@ -2,7 +2,7 @@
 # Start the whole Nakhla IT Helpdesk stack with one command (macOS / Linux).
 #   ./run.sh
 # Creates .venv on first run, installs requirements, then starts:
-#   helpdesk API :8102, agent API :8000, Gradio UI :7860.
+#   helpdesk API :8102, agent API :8000, Next.js web UI :3000.
 # Extra arguments are passed to run.py (for example: ./run.sh --no-ui).
 set -euo pipefail
 cd "$(dirname "$0")"

@@ -2,8 +2,7 @@
 #   .\run.ps1
 # Creates .venv on first run, installs requirements, then starts:
 #   helpdesk API :8102, agent API :8000, Next.js web UI :3000.
-# Extra arguments are passed to run.py (for example: .\run.ps1 --no-ui,
-# or .\run.ps1 --legacy-ui for the old Gradio UI on :7860).
+# Extra arguments are passed to run.py (for example: .\run.ps1 --no-ui).
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 

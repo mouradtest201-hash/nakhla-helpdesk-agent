@@ -4,8 +4,7 @@ Starts, in order:
 
 1. the simulated helpdesk API on :8102 (system of record),
 2. this project's FastAPI agent on :8000,
-3. the Next.js web client on :3000 (skipped with ``--no-ui``; use
-   ``--legacy-ui`` for the old Gradio client on :7860).
+3. the Next.js web client on :3000 (skipped with ``--no-ui``).
 
 Run it from the repository root with the project venv:
 
@@ -111,10 +110,7 @@ def stop_all() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start the Nakhla IT Helpdesk Agent stack.")
-    parser.add_argument("--no-ui", action="store_true", help="do not start any web client")
-    parser.add_argument(
-        "--legacy-ui", action="store_true", help="start the old Gradio client instead of the Next.js app"
-    )
+    parser.add_argument("--no-ui", action="store_true", help="do not start the web client")
     parser.add_argument("--no-helpdesk", action="store_true", help="use an already running helpdesk API")
     args = parser.parse_args()
 
@@ -140,23 +136,11 @@ def main() -> int:
             return 1
 
         ui_url = ""
-        if not args.no_ui and args.legacy_ui:
-            try:
-                import gradio  # noqa: F401
-            except ImportError:
-                say("Gradio is not installed; skipping the UI. Use --no-ui to silence this.")
-            else:
-                start(
-                    "UI",
-                    [python, "ui/app_ui.py"],
-                    port=int(os.getenv("UI_PORT", "7860")),
-                )
-                ui_url = "http://localhost:7860"
-        elif not args.no_ui:
+        if not args.no_ui:
             npm = shutil.which("npm")
             web = ROOT / "web"
             if not npm:
-                say("Node.js/npm not found; skipping the web UI. Install Node or use --legacy-ui.")
+                say("Node.js/npm not found; skipping the web UI. Install Node or use --no-ui.")
             else:
                 if not (web / "node_modules").exists():
                     say("Installing web dependencies (first run) ...")

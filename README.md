@@ -32,11 +32,11 @@ employee ── POST /api/approve ──► approval LangGraph
 | **Short- and long-term memory** | Short term: persisted session turns, last intake/decision, pending action and status cache (SQLite + in-process cache). Long term: employee profile cache, saved preferences, draft/ticket facts, and ticket history fetched from the helpdesk. |
 | **Guardrails + approval gate** | Input checks, untrusted-source scrubbing, prompt-injection handling, secret redaction, citation allow-list, no unbacked ticket IDs, strict policy refusals, and a single write path. |
 | **10+ evals, scorecard, fixed failure** | 10 provided cases **10/10**, 20 additional cases **20/20**, 27 unit tests, and eight targeted hardening fixes (see [Evaluation](#evaluation)). |
-| **Contract + one-command start + UI** | `GET /health`, `POST /api/chat`, `POST /api/approve`; `.\run.ps1`, `./run.sh`, or `docker compose up --build`; Gradio client with sources, tool calls and a draft-approval card. |
+| **Contract + one-command start + UI** | `GET /health`, `POST /api/chat`, `POST /api/approve`; `.\run.ps1`, `./run.sh`, or `docker compose up --build`; Next.js client with sources, tool calls and a draft-approval card. |
 
 ## Quick start
 
-Requirements: Python 3.12, an OpenRouter API key, and (optionally) Docker.
+Requirements: Python 3.12, Node.js 22.13+, npm, an OpenRouter API key, and (optionally) Docker.
 
 ```powershell
 # Windows
@@ -56,12 +56,14 @@ Or inside an existing venv:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+Push-Location web; npm ci; Pop-Location
 python run.py
 ```
 
-The runner starts the helpdesk API on **:8102**, the agent on **:8000**, and the UI on **:7860**.
-`Ctrl+C` stops all three. `--no-ui` skips Gradio; `--no-helpdesk` uses an API that is already
-running.
+The runner starts the helpdesk API on **:8102**, the agent on **:8000**, and the Next.js UI on
+**:3000**. Node.js 22.13+ and npm are required for the web UI; `run.ps1` and `run.sh` install its
+dependencies on first use. `Ctrl+C` stops all three. `--no-ui` skips the web client;
+`--no-helpdesk` uses an API that is already running.
 
 Docker (starts helpdesk, agent and UI in one command):
 
@@ -72,7 +74,7 @@ docker compose up --build
 | Service | URL |
 |---|---|
 | Agent API docs | http://localhost:8000/docs |
-| Gradio UI | http://localhost:7860 |
+| Web UI | http://localhost:3000 |
 | Simulated helpdesk docs | http://localhost:8102/docs |
 
 The first start builds a 111-chunk index from the Markdown **and PDF** knowledge base. Embeddings
@@ -239,7 +241,8 @@ app/
 dataset/, services/        provided kit (unchanged)
 evals/                     shared runner, 10 sample + 20 extra cases
 tests/                     unit tests (policy, guardrails, knowledge base, graph)
-ui/app_ui.py               Gradio client (sources, tools, approve/reject card)
+web/                       Next.js client (chat, requester, review and approval panels)
+ui/app_ui.py               optional legacy Gradio client
 run.py, run.ps1, run.sh    one-command local start
 Dockerfile                 app image; docker-compose.yml starts helpdesk + app + UI
 DESIGN.md                  architecture, trade-offs and failure analysis
@@ -267,7 +270,7 @@ More detail, including the state table and the threat model, is in [DESIGN.md](D
   client, as the course contract specifies. A real deployment must derive identity from SSO.
 - The deterministic playbooks intentionally cover every error code in the manifest. A brand-new code
   is escalated honestly rather than answered speculatively, until the KB is updated.
-- The Gradio UI is a demo client, not an accessibility- or mobile-certified helpdesk console.
+- The web UI is a demo client, not a production helpdesk console; it does not provide end-user authentication.
 
 ## License / dataset
 

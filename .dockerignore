@@ -12,3 +12,6 @@ data
 *.npz
 .env
 evals/scorecard.*
+web/node_modules
+web/.next
+web/out

@@ -4,7 +4,7 @@ Starts, in order:
 
 1. the simulated helpdesk API on :8102 (system of record),
 2. this project's FastAPI agent on :8000,
-3. the Gradio client on :7860 (optional, skipped with ``--no-ui``).
+3. the Next.js web client on :3000 (optional, skipped with ``--no-ui``).
 
 Run it from the repository root with the project venv:
 
@@ -12,7 +12,8 @@ Run it from the repository root with the project venv:
     ./.venv/bin/python run.py                    # macOS / Linux
 
 or use ``run.ps1`` / ``run.sh``, which create the venv and install
-dependencies first.  Ctrl+C stops every child process.
+dependencies first. The web client also requires Node.js and npm dependencies
+installed with ``npm ci`` in ``web``. Ctrl+C stops every child process.
 """
 from __future__ import annotations
 
@@ -64,7 +65,14 @@ def wait_for_health(url: str, seconds: float = 40.0) -> bool:
     return False
 
 
-def start(name: str, command: list[str], *, port: int, health: str | None = None) -> bool:
+def start(
+    name: str,
+    command: list[str],
+    *,
+    port: int,
+    health: str | None = None,
+    cwd: Path = ROOT,
+) -> bool:
     if port_open(port):
         say(f"{name} is already listening on :{port}; reusing it.")
         if health and not wait_for_health(health, 10):
@@ -72,7 +80,7 @@ def start(name: str, command: list[str], *, port: int, health: str | None = None
             return False
         return True
     say(f"Starting {name} on :{port} ...")
-    process = subprocess.Popen(command, cwd=ROOT)
+    process = subprocess.Popen(command, cwd=cwd)
     CHILDREN.append((name, process))
     if health:
         if not wait_for_health(health):
@@ -96,7 +104,7 @@ def stop_all() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start the Nakhla IT Helpdesk Agent stack.")
-    parser.add_argument("--no-ui", action="store_true", help="do not start the Gradio client")
+    parser.add_argument("--no-ui", action="store_true", help="do not start the Next.js web client")
     parser.add_argument("--no-helpdesk", action="store_true", help="use an already running helpdesk API")
     args = parser.parse_args()
 
@@ -122,22 +130,32 @@ def main() -> int:
             return 1
 
         if not args.no_ui:
-            try:
-                import gradio  # noqa: F401
-            except ImportError:
-                say("Gradio is not installed; skipping the UI. Use --no-ui to silence this.")
-            else:
-                start(
-                    "UI",
-                    [python, "ui/app_ui.py"],
-                    port=int(os.getenv("UI_PORT", "7860")),
-                )
+            node = shutil.which("node")
+            web_dir = ROOT / "web"
+            ui_port = int(os.getenv("UI_PORT", "3000"))
+            if not node:
+                say("Node.js is required for the web UI. Install Node.js, or use --no-ui.")
+                return 1
+            next_cli = web_dir / "node_modules" / "next" / "dist" / "bin" / "next"
+            if not next_cli.is_file():
+                say("Web UI dependencies are missing. Run npm ci in .\\web, or use --no-ui.")
+                return 1
+
+            command = [node, str(next_cli), "dev", "--hostname", "127.0.0.1", "--port", str(ui_port)]
+            if not start(
+                "Web UI",
+                command,
+                port=ui_port,
+                health=f"http://127.0.0.1:{ui_port}",
+                cwd=web_dir,
+            ):
+                return 1
 
         say("")
         say("Agent API : http://localhost:8000/docs")
         say("Helpdesk  : http://localhost:8102/docs")
         if not args.no_ui:
-            say("UI        : http://localhost:7860")
+            say(f"Web UI    : http://localhost:{int(os.getenv('UI_PORT', '3000'))}")
         say("Press Ctrl+C to stop.")
         while True:
             time.sleep(0.6)

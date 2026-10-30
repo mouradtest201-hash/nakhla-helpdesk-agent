@@ -25,6 +25,11 @@ ADMIN_RIGHTS_RE = re.compile(
 )
 CONTRACTOR_INSTALL_RE = re.compile(r"\b(install|software center|download|licen[cs]e)\b", re.I)
 ERROR_CODE_RE = re.compile(r"\b(?:NX|NID|MFA|SWC|MDM|PRN|NXM|WLAN|ENG)-\d+\b", re.I)
+GATEWAY_QUESTION_RE = re.compile(
+    r"\b(?:switch|switching|change|changing|move|use|try)\w*\b.{0,30}\b(?:gateway|gw-\d)\b"
+    r"|\b(?:gateway|gw-\d)\b.{0,30}\b(?:switch|switching|change|fix|work|help)\w*\b",
+    re.I,
+)
 
 
 
@@ -72,6 +77,72 @@ def _steps(play: Playbook) -> str:
     return "\n".join(lines)
 
 
+def _vpn_component(status: dict[str, Any] | None, gateway: str) -> dict[str, Any] | None:
+    for service in (status or {}).get("services") or []:
+        if service.get("id") != "vpn":
+            continue
+        for component in service.get("components") or []:
+            if str(component.get("id", "")).upper() == gateway.upper():
+                return component
+        return service
+    return None
+
+
+def _finance_status_line(status: dict[str, Any] | None, gateway: str) -> str:
+    """KB-016: Finance staff check the status page instead of the client."""
+    if not status:
+        return f"Please check https://status.nakhla.example; your Finance gateway is **{gateway}**."
+    component = _vpn_component(status, gateway) or {}
+    state = component.get("status") or "unknown"
+    if state == "operational":
+        line = f"I checked the status page: **{gateway} is operational**."
+    else:
+        line = f"The status page shows **{gateway} is {state}**."
+    unrelated: list[str] = []
+    for incident in status.get("incidents") or []:
+        if incident.get("status") != "active" or incident.get("service") != "vpn":
+            continue
+        scope = f"{incident.get('title', '')} {incident.get('affected', '')}"
+        gateways = {g.upper() for g in re.findall(r"\bGW-\d+\b", scope, re.I)}
+        if gateways and gateway.upper() not in gateways:
+            unrelated.append(f"**{incident.get('id')}** ({', '.join(sorted(gateways))} only)")
+    if unrelated and state == "operational":
+        line += f" The active VPN incident {'; '.join(unrelated)} does not affect you."
+    return line
+
+
+def _finance_vpn_answer(
+    decision: Decision,
+    intake: IntakeResult,
+    employee: Employee | None,
+    status: dict[str, Any] | None,
+    message: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """KB-016 / KB-002: Finance VPN problems go to Security Operations.
+
+    The department rule says not to troubleshoot the client, so no KB-002
+    playbook steps are emitted here - only the routing, the status page and an
+    explicit answer when the employee asks about changing gateway.
+    """
+    gateway = (employee.vpn_gateway if employee and employee.vpn_gateway else "GW-3")
+    paragraphs: list[str] = []
+    if GATEWAY_QUESTION_RE.search(message or ""):
+        paragraphs.append(
+            f"**No - don't switch gateways.** Finance laptops use the **FIN-SECURE** profile on "
+            f"**{gateway}**, and only Security Operations may change that (KB-002, KB-016)."
+        )
+    paragraphs.append(_finance_status_line(status, gateway))
+    code = (intake.error_code or "").upper()
+    meaning = f"`{code}` means the gateway is unavailable or overloaded (KB-002). " if code else ""
+    paragraphs.append(
+        f"{meaning}Because you are in **Finance**, VPN problems go straight to **Security Operations** "
+        f"as a `{decision.category}` **{decision.priority}** ticket; I won't walk you through reinstalling "
+        "or reconfiguring the client (KB-016)."
+    )
+    reply = "\n\n".join(part for part in paragraphs if part)
+    return reply, citations_for(decision.kb_refs or ["KB-002", "KB-016"])
+
+
 async def troubleshooting_reply(
     decision: Decision,
     intake: IntakeResult,
@@ -80,7 +151,18 @@ async def troubleshooting_reply(
     *,
     meter: UsageMeter | None = None,
     use_llm: bool = True,
+    status: dict[str, Any] | None = None,
+    message: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
+    # KB-016: Finance VPN/remote access is a Security Operations matter and the
+    # client must not be troubleshot.  Answer without playbook steps.
+    if decision.finance_vpn:
+        reply, citations = _finance_vpn_answer(decision, intake, employee, status, message)
+        reply += _ticket_offer(
+            intake, decision, None, lead="If you'd like, I can prepare a"
+        )
+        return reply, citations
+
     play = playbook_for(intake.error_code)
     cites = decision.kb_refs or ([play.doc] if play else retrieval.doc_ids[:2])
     citations = citations_for(cites)
@@ -90,15 +172,7 @@ async def troubleshooting_reply(
         lead = f"**{play.title}**"
         body = _steps(play)
         reply = f"{lead}\n\n{body}"
-        topic = decision.topic
-        if employee and employee.department == "Finance" and decision.finance_vpn:
-            reply += (
-                "\n\nBecause you are in **Finance**, VPN problems go straight to **Security Operations** "
-                "(category `security`, P2; P1 if more than 3 users). Please don't reinstall or reconfigure the "
-                "client: your FIN-SECURE profile on GW-3 is managed by Security Operations (KB-016). "
-                "If you'd like, I can prepare the ticket."
-            )
-        elif employee and (employee.vip or employee.department == "Executive Office"):
+        if employee and (employee.vip or employee.department == "Executive Office"):
             reply += (
                 "\n\nAs an Executive Office request this is **P1 (VIP)**; the Service Desk lead is informed "
                 "of every Executive Office ticket (KB-016)."
@@ -134,12 +208,19 @@ async def troubleshooting_reply(
     return unknown_reply(decision, intake, employee)
 
 
-def _ticket_offer(intake: IntakeResult, decision: Decision, play: Playbook | None) -> str:
+def _ticket_offer(
+    intake: IntakeResult,
+    decision: Decision,
+    play: Playbook | None,
+    *,
+    lead: str | None = None,
+) -> str:
     if decision.refusal or intake.explicit_ticket_request or getattr(decision, "ticket_proposed", False):
         return ""
     # KB-015 s5: offer escalation when the steps do not fix it.
+    prefix = lead or "If these steps don't fix it, tell me what happened and I can prepare a"
     return (
-        "\n\nIf these steps don't fix it, tell me what happened and I can prepare a "
+        f"\n\n{prefix} "
         f"`{decision.category}` **{decision.priority}** ticket for {decision.assigned_team}."
     )
 
@@ -174,8 +255,6 @@ def _generic_topic_reply(
     reply = lead + text
     if best:
         reply += f"\n\nSource: {best.doc_id}."
-    if employee and employee.department == "Finance" and decision.finance_vpn:
-        reply += "\n\nFinance VPN problems go straight to Security Operations (KB-016); I won't ask you to reconfigure the client."
     return reply
 
 

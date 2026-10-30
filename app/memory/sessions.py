@@ -32,7 +32,6 @@ class SessionState:
     pending_action_id: str | None = None
     status_cache: dict[str, Any] | None = None
     status_at: float = 0.0
-    offered_ticket: bool = False
     asked_for: list[str] = field(default_factory=list)
     tickets_created: list[str] = field(default_factory=list)
     memory_notes: list[str] = field(default_factory=list)

@@ -143,6 +143,36 @@ def test_reply_reports_status_page_and_unrelated_incident():
     assert "does not affect you" in reply
 
 
+def test_nx503_wording_does_not_contradict_operational_gateway():
+    """The code explanation must not imply an outage when GW-3 is up."""
+    reply = reply_for("VPN connection problems with error NX-503.", code="NX-503", emp=employee())
+    assert "is the gateway-unavailable code" in reply
+    assert "isn't a gateway outage" in reply
+    assert "means the gateway is unavailable" not in reply
+
+
+def test_nx503_wording_reports_a_degraded_gateway():
+    status = {
+        "services": [
+            {
+                "id": "vpn",
+                "name": "NakhlaConnect VPN",
+                "status": "degraded",
+                "components": [
+                    {"id": "GW-3", "name": "Gateway GW-3 (Finance)", "status": "degraded"}
+                ],
+            }
+        ],
+        "incidents": [],
+    }
+    reply = reply_for(
+        "VPN connection problems with error NX-503.", code="NX-503", emp=employee(), status=status
+    )
+    assert "GW-3 is degraded" in reply
+    assert "gateway itself needs attention" in reply
+    assert "isn't a gateway outage" not in reply
+
+
 def test_reply_does_not_explain_gateway_change_when_not_asked():
     reply = reply_for("NX-503 when I connect from home.", code="NX-503", emp=employee())
     assert "don't switch gateways" not in reply.lower()

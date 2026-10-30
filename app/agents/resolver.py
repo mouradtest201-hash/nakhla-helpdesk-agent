@@ -88,12 +88,18 @@ def _vpn_component(status: dict[str, Any] | None, gateway: str) -> dict[str, Any
     return None
 
 
+def _gateway_state(status: dict[str, Any] | None, gateway: str) -> str:
+    if not status:
+        return "unknown"
+    component = _vpn_component(status, gateway) or {}
+    return component.get("status") or "unknown"
+
+
 def _finance_status_line(status: dict[str, Any] | None, gateway: str) -> str:
     """KB-016: Finance staff check the status page instead of the client."""
     if not status:
         return f"Please check https://status.nakhla.example; your Finance gateway is **{gateway}**."
-    component = _vpn_component(status, gateway) or {}
-    state = component.get("status") or "unknown"
+    state = _gateway_state(status, gateway)
     if state == "operational":
         line = f"I checked the status page: **{gateway} is operational**."
     else:
@@ -133,7 +139,21 @@ def _finance_vpn_answer(
         )
     paragraphs.append(_finance_status_line(status, gateway))
     code = (intake.error_code or "").upper()
-    meaning = f"`{code}` means the gateway is unavailable or overloaded (KB-002). " if code else ""
+    meaning = ""
+    if code:
+        state = _gateway_state(status, gateway)
+        meaning = f"`{code}` is the gateway-unavailable code (KB-002)"
+        if state == "operational":
+            meaning += (
+                f"; since **{gateway}** is operational, this isn't a gateway outage, so it needs a "
+                "check of your account and FIN-SECURE profile"
+            )
+        elif state != "unknown":
+            meaning += (
+                f", and the status page shows **{gateway} is {state}**, so the gateway itself "
+                "needs attention"
+            )
+        meaning += ". "
     paragraphs.append(
         f"{meaning}Because you are in **Finance**, VPN problems go straight to **Security Operations** "
         f"as a `{decision.category}` **{decision.priority}** ticket; I won't walk you through reinstalling "

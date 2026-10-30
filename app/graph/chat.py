@@ -82,6 +82,23 @@ NOTE_RE = re.compile(
 )
 
 
+def _incident_applies(incident: dict[str, Any], employee: Employee | None) -> bool:
+    """A gateway incident only concerns employees on that gateway (KB-002, KB-016).
+
+    INC-2207 is GW-2 only and says Finance users stay on GW-3, so a Finance
+    employee on GW-3 must not be told to apply its workaround.  When the
+    incident does not name gateways we keep it, rather than hide information.
+    """
+    gateway = getattr(employee, "vpn_gateway", None)
+    if not gateway:
+        return True
+    scope = f"{incident.get('title', '')} {incident.get('affected', '')}"
+    gateways = {g.upper() for g in re.findall(r"\bGW-\d+\b", scope, re.I)}
+    if not gateways:
+        return True
+    return gateway.upper() in gateways
+
+
 def match_incident(
     status: dict[str, Any] | None,
     code: str | None,
@@ -98,13 +115,15 @@ def match_incident(
             continue
         codes = [str(c).upper() for c in incident.get("error_codes") or []]
         if code and code.upper() in codes:
-            if employee and employee.department == "Finance" and employee.vpn_gateway == "GW-3":
-                continue
-            return incident
+            if _incident_applies(incident, employee):
+                return incident
+            continue
         if not code and topic == "vpn" and incident.get("service") == "vpn":
             symptoms = f"{incident.get('title', '')} {incident.get('symptoms', '')}".lower()
-            if any(word in low for word in ("disconnect", "every few minutes", "gateway degraded")) and any(
-                word in symptoms for word in ("disconnect", "gateway", "degraded")
+            if (
+                any(word in low for word in ("disconnect", "every few minutes", "gateway degraded"))
+                and any(word in symptoms for word in ("disconnect", "gateway", "degraded"))
+                and _incident_applies(incident, employee)
             ):
                 return incident
     return None
@@ -717,6 +736,8 @@ class ChatNodes:
                 retrieval,
                 meter=meter,
                 use_llm=bool(state.get("email")),
+                status=state.get("status"),
+                message=state.get("text") or "",
             )
         else:
             reply, citations = unknown_reply(decision, intake, employee)

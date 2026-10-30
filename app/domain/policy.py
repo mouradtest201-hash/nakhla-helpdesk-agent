@@ -68,6 +68,26 @@ REPEATED_LOCKOUT_RE = re.compile(
 BLOCKED_RE = re.compile(r"\b(cannot|can't|can not|unable to|blocked|no workaround|completely stuck)\b.{0,40}\b(work|job|connect|access|do anything)\b", re.I)
 WORKAROUND_RE = re.compile(r"\b(wired|hotspot|another printer|different printer|guest wi-?fi|tether|temporary workaround|still usable)\b", re.I)
 URGENT_RE = re.compile(r"\b(urgent|asap|immediately|critical|emergency)\b", re.I)
+# KB-016 scopes the Finance exception to VPN / remote access, not to every
+# Finance request.
+FINANCE_REMOTE_ACCESS_RE = re.compile(
+    r"\b(vpn|nakhla ?connect|remote access|fin-secure|gw-\d)\b",
+    re.I,
+)
+
+
+def _finance_remote_access(
+    employee: Employee | None,
+    topic: str | None,
+    play: Playbook | None,
+    message: str,
+) -> bool:
+    """True only for Finance VPN/remote-access problems (KB-016)."""
+    if employee is None or employee.department != "Finance":
+        return False
+    if topic == "vpn" or (play is not None and play.topic == "vpn"):
+        return True
+    return FINANCE_REMOTE_ACCESS_RE.search(message or "") is not None
 
 
 def detect_ticket_request(text: str) -> bool:
@@ -296,6 +316,7 @@ def _category(
     play: Playbook | None,
     topic: str | None,
     employee: Employee | None,
+    finance_vpn: bool = False,
 ) -> str:
     low = message.lower()
     if _security_incident(message, intake):
@@ -310,9 +331,7 @@ def _category(
     if re.search(r"\b(vdi|nakhla workspace|virtual desktop)\b", low):
         return "network_access"
     # Finance VPN is a security ticket, not network_access (KB-016 / C5).
-    if employee and employee.department == "Finance" and (
-        (play and play.topic == "vpn") or (topic in ("vpn", "wifi") and "vpn" in low)
-    ):
+    if finance_vpn:
         return "security"
     if play:
         return play.category
@@ -328,6 +347,7 @@ def _priority(
     topic: str | None,
     category: str,
     employee: Employee | None,
+    finance_vpn: bool = False,
 ) -> str:
     # Hard, non-negotiable elevators (KB-015 + KB-016).
     if employee and (employee.vip or employee.department == "Executive Office"):
@@ -337,9 +357,7 @@ def _priority(
     if intake.affected_users >= 4:
         return "P1"
 
-    if employee and employee.department == "Finance" and category == "security" and (
-        topic == "vpn" or (play and play.topic == "vpn")
-    ):
+    if finance_vpn and category == "security":
         return "P1" if intake.affected_users > 3 else "P2"
 
     # KB-012: a missing laptop blocks the new starter completely (P2); a
@@ -396,8 +414,9 @@ def decide(
         topic = "other"
 
     refusal = policy_refusal(message, employee, intake)
-    category = _category(message, intake, play, topic, employee)
-    priority = _priority(message, intake, play, topic, category, employee)
+    finance_vpn = _finance_remote_access(employee, topic, play, message)
+    category = _category(message, intake, play, topic, employee, finance_vpn)
+    priority = _priority(message, intake, play, topic, category, employee, finance_vpn)
     assigned = manifest.route_for(category)
     kb_refs: list[str] = []
     if play:
@@ -406,7 +425,7 @@ def decide(
         kb_refs.extend(TOPICS[topic].docs)
 
     # Department documents are part of the rationale and are valid citations.
-    if employee and employee.department == "Finance" and category == "security":
+    if finance_vpn:
         for doc_id in ("KB-016", "KB-002"):
             if doc_id not in kb_refs:
                 kb_refs.append(doc_id)
@@ -442,7 +461,7 @@ def decide(
         rationale.append(f"department={employee.department}")
         if employee.vip:
             rationale.append("Executive Office VIP -> P1 (KB-016)")
-        if employee.department == "Finance" and category == "security":
+        if finance_vpn:
             rationale.append("Finance VPN exception -> security / Security Operations (KB-016)")
     if intake.affected_users >= 4:
         rationale.append("more than 3 users affected -> P1 (KB-015)")
@@ -460,7 +479,7 @@ def decide(
         refusal=refusal,
         rationale=rationale,
         security_incident=_security_incident(message, intake),
-        finance_vpn=bool(employee and employee.department == "Finance" and category == "security"),
+        finance_vpn=finance_vpn,
         contractor_vpn=bool(refusal and refusal.kind == "contractor_vpn"),
         blocked=_officially_blocked(intake),
     )

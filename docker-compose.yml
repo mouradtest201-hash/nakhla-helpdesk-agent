@@ -1,6 +1,6 @@
 # One command starts the whole stack:
 #   docker compose up --build
-#   agent API: http://localhost:8000/docs   UI: http://localhost:7860   helpdesk: http://localhost:8102/docs
+#   agent API: http://localhost:8000/docs   UI: http://localhost:3000   helpdesk: http://localhost:8102/docs
 services:
   helpdesk-api:
     build:
@@ -34,15 +34,13 @@ services:
 
   ui:
     build:
-      context: .
+      context: ./web
       dockerfile: Dockerfile
-    command: ["python", "ui/app_ui.py"]
     ports:
-      - "7860:7860"
+      - "3000:3000"
     environment:
-      APP_URL: http://app:8000
-      UI_HOST: 0.0.0.0
-      UI_PORT: 7860
+      AGENT_URL: http://app:8000
+      PORT: 3000
     depends_on:
       app:
         condition: service_healthy

@@ -8,7 +8,7 @@ Everything your agent needs around it, so your week goes into the agent:
   (2 of them PDF-only), 40 historical tickets, 25 employees, a status page;
 - the company's **helpdesk API** (simulated system of record, FastAPI, port **8102**);
 - an **MCP server** in front of it (stdio, 6 tools);
-- a **UI starter**, the **eval runner** and 10 **sample cases**.
+- a **Next.js web UI**, the **eval runner** and 10 **sample cases**.
 
 You build the agent: retrieval over the knowledge base, the conversation, the approval gate,
 your API contract on port 8000. Do not change the simulated systems: the hidden tests run
@@ -43,7 +43,8 @@ Already have the course's Module 2 venv? `pip install -r requirements.txt` into 
 | `services/helpdesk_mcp.py` | the MCP server your agent uses (`python -m services.helpdesk_mcp`) |
 | `services/data/` | seed data: `employees.json` (directory), `status.json` (status page) |
 | `services/Dockerfile`, `docker-compose.yml` | container for the API; add your app to the compose file |
-| `ui/app_ui.py` | Gradio starter: chat, sources panel, ticket-draft card with Approve / Reject. Talks only to your API. |
+| `web/` | Next.js client: chat, requester, sources and ticket approval panels. Talks only to your API. |
+| `ui/app_ui.py` | Optional legacy Gradio client for the same API. |
 | `evals/` | `cases.sample.jsonl` (10 cases) and `run_evals.py` (the shared runner) |
 | `check_kit.py` | smoke test: API health, a keyed REST call, MCP `list_tools` + one read call |
 
@@ -140,14 +141,16 @@ Show only the `ticket_id` the API returned. A rejected draft writes nothing.
 | `HELPDESK_MCP_LOG_LEVEL` | `WARNING` | MCP server log level on stderr |
 | `HELPDESK_DATA_DIR`, `HELPDESK_DATASET_DIR` | `services/data`, `dataset` | API seed files |
 | `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, `MODEL`, `EMBEDDING_MODEL` | see `.env.example` | your agent |
-| `APP_URL` | `http://localhost:8000` | UI starter, eval runner |
+| `AGENT_URL` | `http://127.0.0.1:8000` | Next.js UI proxy target |
+| `APP_URL` | `http://localhost:8000` | eval runner and legacy Gradio client |
 
 The API and the MCP server also read the kit's `.env` (without overriding variables you already set).
 
-## UI starter and evals
+## Web UI and evals
 
 ```powershell
-python ui/app_ui.py                          # http://localhost:7860, talks to APP_URL
+cd web; npm ci; npm run dev                  # http://localhost:3000
+python ui/app_ui.py                          # optional legacy Gradio UI, http://localhost:7860
 python evals/run_evals.py                    # the 10 sample cases against your app on :8000
 python evals/run_evals.py --only S2-05 -v    # one case, every turn
 ```
